@@ -135,3 +135,5 @@ type ClientInfo {
   version: String
 }
 ```
+
+#### initialized - response

@@ -1,0 +1,7 @@
+content-length: 68
+
+{
+  "id": "1",
+  "jsonrpc": "2.0",
+  "method": "initialized"
+}
