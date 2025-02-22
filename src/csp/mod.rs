@@ -15,6 +15,12 @@ pub struct Response<T> {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct Notification<T> {
+    pub method: String,
+    pub params: Option<T>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct InitializeRequest {
     #[serde(rename = "processId")]
     pub process_id: Option<i32>,
@@ -44,12 +50,23 @@ pub struct ServerInfo {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct InitializedNotification {
-    pub params: (),
-}
+pub struct InitializedNotification;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ShutdownRequest;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ShutdownResponse;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CursorMovedNotification {
+    pub client_id: String,
+    pub location: DocumentLocation,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DocumentLocation {
+    pub uri: String,
+    pub line: i32,
+    pub column: i32,
+}

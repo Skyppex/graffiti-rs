@@ -13,6 +13,11 @@ pub struct Method {
     pub method: String,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct Params<T> {
+    params: T,
+}
+
 #[derive(Debug, Clone)]
 pub struct DecodedMessage {
     pub id: Option<String>,
@@ -47,18 +52,18 @@ pub fn decode(message: &str) -> Result<DecodedMessage, Box<dyn Error>> {
         .take(content_length)
         .collect::<Vec<_>>();
 
-    let id = from_slice::<Id>(&content)?;
+    let id = from_slice::<Id>(&content).ok();
     let method = from_slice::<Method>(&content)?;
 
     Ok(DecodedMessage {
-        id: Some(id.id),
+        id: id.map(|id| id.id),
         method: method.method,
         content,
     })
 }
 
 pub fn decode_params<'a, T: Deserialize<'a>>(content: &'a [u8]) -> serde_json::error::Result<T> {
-    from_slice::<T>(content)
+    from_slice::<Params<T>>(content).map(|params| params.params)
 }
 
 pub fn encode<T: Serialize>(value: T) -> Result<Vec<u8>, Box<dyn Error>> {

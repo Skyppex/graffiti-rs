@@ -1,0 +1,15 @@
+content-length: 205
+
+{
+  "id": "4",
+  "jsonrpc": "2.0",
+  "method": "cursor_moved",
+  "params": {
+    "client_id": "1",
+    "location": {
+      "uri": "src/main.rs",
+      "line": 3,
+      "column": 0
+    }
+  }
+}

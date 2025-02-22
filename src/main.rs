@@ -109,7 +109,7 @@ fn handle_message(
         "initialize" => {
             let params = rpc::decode_params::<csp::InitializeRequest>(content)?;
 
-            dbg!(&params);
+            dbg!(params);
 
             let response = rpc::encode(Response::<InitializeResponse> {
                 id,
@@ -123,6 +123,16 @@ fn handle_message(
 
             writer.write_all(&response)?;
             writeln!(writer)?;
+
+            Ok(HandledMessage {
+                should_exit: false,
+                shutdown_received: false,
+            })
+        }
+        "cursor_moved" => {
+            let params = rpc::decode_params::<csp::CursorMovedNotification>(content)?;
+
+            dbg!(params);
 
             Ok(HandledMessage {
                 should_exit: false,
