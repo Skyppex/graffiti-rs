@@ -204,9 +204,12 @@ pub struct HandledMessage {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use fluid::prelude::*;
+
     use crate::{
         csp::{InitializeRequest, InitializeResponse, Request, Response},
-        handle_message, rpc, Logger,
+        rpc, Logger,
     };
 
     fn test_message(message: Vec<u8>) -> Vec<u8> {
@@ -260,6 +263,8 @@ mod tests {
     }
 
     fn assert_message_eq<T: serde::Serialize>(message: Vec<u8>, expected: T) {
-        assert_eq!(message, rpc::encode(expected).expect("Failed to encode"));
+        message
+            .should()
+            .be_equal_to(rpc::encode(expected).expect("Failed to encode"));
     }
 }

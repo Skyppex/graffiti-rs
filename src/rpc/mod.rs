@@ -69,14 +69,15 @@ pub fn encode<T: Serialize>(value: T) -> Result<Vec<u8>, Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fluid::prelude::*;
 
     #[test]
     fn test_decode() {
         let message = "content-length: 25\r\n\r\n{\"id:\"0\",\"method\":\"test\"}";
         let decoded = decode(message).unwrap();
-        assert_eq!(decoded.id, Some("0".to_string()));
-        assert_eq!(decoded.method, "test");
-        assert_eq!(decoded.content.len(), 25);
+        decoded.id.should().be_equal_to(Some("0".to_string()));
+        decoded.method.should().be_equal_to("test");
+        decoded.content.len().should().be_equal_to(25);
     }
     #[test]
     fn test_encode() {
@@ -85,9 +86,9 @@ mod tests {
         };
 
         let message = encode(base_message).unwrap();
-        assert_eq!(
-            String::from_utf8(message).unwrap(),
-            "content-length: 17\r\n\r\n{\"method\":\"test\"}"
-        );
+
+        message
+            .should()
+            .be_equal_to("content-length: 17\r\n\r\n{\"method\":\"test\"}".as_bytes());
     }
 }
