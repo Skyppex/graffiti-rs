@@ -1,5 +1,6 @@
 mod cli;
 mod csp;
+mod net;
 mod path_utils;
 mod rpc;
 
@@ -7,21 +8,35 @@ use std::{
     error::Error,
     io::{self, BufReader, Read, Write},
     process,
+    sync::{Arc, Mutex},
 };
 
 use chrono::Local;
 use csp::{InitializeResponse, Response, ShutdownResponse};
 
 use clap::Parser;
-use cli::Cli;
+use cli::{Cli, Commands};
+use net::{run_client, run_host};
 
-type DynResult<T> = Result<T, Box<dyn Error>>;
+type DynResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
-fn main() -> DynResult<()> {
+#[tokio::main]
+async fn main() -> DynResult<()> {
     let cli = Cli::parse();
 
-    let mut logger = get_logger(&cli)?;
+    let mut logger = Arc::new(Mutex::new(get_logger(&cli)?));
     logger.log("Starting graffiti-rs")?;
+
+    let network_handle = match cli.command {
+        Commands::Host => {
+            logger.log("Starting host mode")?;
+            tokio::spawn(run_host(logger.clone()))
+        }
+        Commands::Connect => {
+            logger.log("Starting client mode")?;
+            tokio::spawn(run_client(logger.clone()))
+        }
+    };
 
     let stdin = io::stdin();
     let reader = stdin.lock();
@@ -32,7 +47,7 @@ fn main() -> DynResult<()> {
     let mut shutting_down = false;
 
     loop {
-        match handle_input(&mut scanner, &mut writer, &mut logger) {
+        match handle_input(&mut scanner, &mut writer, logger.clone()) {
             Ok(HandledMessage {
                 shutdown_received,
                 should_exit,
@@ -51,6 +66,8 @@ fn main() -> DynResult<()> {
         }
     }
 
+    network_handle.abort();
+
     if !shutting_down {
         logger.log("Exiting without shutdown message")?;
         process::exit(1);
@@ -62,7 +79,7 @@ fn main() -> DynResult<()> {
 fn handle_input(
     scanner: &mut BufReader<impl Read>,
     writer: &mut impl Write,
-    logger: &mut Logger,
+    logger: Arc<Mutex<Logger>>,
 ) -> DynResult<HandledMessage> {
     let decoded = rpc::decode(scanner)?;
 
@@ -80,7 +97,7 @@ fn handle_message(
     method: &str,
     _content: &[u8],
     writer: &mut impl Write,
-    _logger: &mut Logger,
+    _logger: Arc<Mutex<Logger>>,
 ) -> DynResult<HandledMessage> {
     match method {
         "initialize" => {
@@ -160,8 +177,12 @@ fn get_logger(cli: &Cli) -> DynResult<Logger> {
     Ok(Logger::empty())
 }
 
+pub trait Log {
+    fn log(&mut self, message: &str) -> DynResult<()>;
+}
+
 pub struct Logger {
-    writer: Option<Box<dyn Write>>,
+    writer: Option<Box<dyn Write + Send>>,
 }
 
 impl Logger {
@@ -169,13 +190,15 @@ impl Logger {
         Logger { writer: None }
     }
 
-    fn new(writer: Box<dyn Write>) -> Logger {
+    fn new(writer: Box<dyn Write + Send>) -> Logger {
         Logger {
             writer: Some(writer),
         }
     }
+}
 
-    pub fn log(&mut self, message: &str) -> DynResult<()> {
+impl Log for Logger {
+    fn log(&mut self, message: &str) -> DynResult<()> {
         if let Some(ref mut writer) = self.writer {
             return writeln!(
                 writer,
@@ -187,6 +210,12 @@ impl Logger {
         }
 
         Ok(())
+    }
+}
+
+impl Log for Arc<Mutex<Logger>> {
+    fn log(&mut self, message: &str) -> DynResult<()> {
+        self.lock().unwrap().log(message)
     }
 }
 
@@ -214,9 +243,9 @@ mod tests {
         let content = decoded.content;
 
         let mut writer = Vec::new();
-        let mut logger = Logger::empty();
+        let logger = Arc::new(Mutex::new(Logger::empty()));
 
-        handle_message(id, &method, &content, &mut writer, &mut logger).unwrap();
+        handle_message(id, &method, &content, &mut writer, logger).unwrap();
 
         writer
     }

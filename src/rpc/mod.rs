@@ -1,7 +1,4 @@
-use std::{
-    error::Error,
-    io::{BufRead, BufReader, Read},
-};
+use std::io::{BufRead, BufReader, Read};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{from_slice, to_string};
@@ -30,7 +27,7 @@ pub struct DecodedMessage {
     pub content: Vec<u8>,
 }
 
-pub fn decode(scanner: &mut BufReader<impl Read>) -> Result<DecodedMessage, Box<dyn Error>> {
+pub fn decode(scanner: &mut BufReader<impl Read>) -> DynResult<DecodedMessage> {
     let message = match read_headers(scanner) {
         Ok(content_length) => {
             // Read exact content
@@ -53,11 +50,13 @@ pub fn decode(scanner: &mut BufReader<impl Read>) -> Result<DecodedMessage, Box<
 }
 
 #[allow(dead_code)]
-pub fn decode_params<'a, T: Deserialize<'a>>(content: &'a [u8]) -> serde_json::error::Result<T> {
-    from_slice::<Params<T>>(content).map(|params| params.params)
+pub fn decode_params<'a, T: Deserialize<'a>>(content: &'a [u8]) -> DynResult<T> {
+    from_slice::<Params<T>>(content)
+        .map(|params| params.params)
+        .map_err(|e| e.into())
 }
 
-pub fn encode<T: Serialize>(value: T) -> Result<Vec<u8>, Box<dyn Error>> {
+pub fn encode<T: Serialize>(value: T) -> DynResult<Vec<u8>> {
     let content = to_string(&value)?;
     Ok(format!("content-length: {}\r\n\r\n{}", content.len(), content).into_bytes())
 }
