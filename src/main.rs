@@ -5,7 +5,7 @@ mod rpc;
 
 use std::{
     error::Error,
-    io::{self, BufRead, BufReader, Read, Write},
+    io::{self, BufReader, Read, Write},
     process,
 };
 
@@ -64,65 +64,7 @@ fn handle_input(
     writer: &mut impl Write,
     logger: &mut Logger,
 ) -> DynResult<HandledMessage> {
-    // Try to read headers
-    match read_headers(scanner) {
-        Ok(content_length) => {
-            // Read exact content
-            let mut buffer = vec![0; content_length];
-            scanner.read_exact(&mut buffer)?;
-            let message =
-                String::from_utf8(buffer).map_err(|_| "Invalid UTF-8 in message content")?;
-
-            process_message(&message, writer, logger)
-        }
-        Err(e) => Err(e),
-    }
-}
-
-fn read_headers(scanner: &mut BufReader<impl Read>) -> DynResult<usize> {
-    let mut content_length = None;
-
-    // Read all headers
-    loop {
-        let mut line = String::new();
-        scanner.read_line(&mut line)?;
-
-        // Empty line (just \r\n) marks end of headers
-        if line == "\r\n" {
-            break;
-        }
-
-        // Parse content-length if we find it
-        if line.to_lowercase().starts_with("content-length: ") {
-            content_length = Some(
-                line[15..]
-                    .trim()
-                    .parse()
-                    .map_err(|_| "Invalid content-length value")?,
-            );
-        }
-    }
-
-    content_length.ok_or("No content-length header found".into())
-}
-
-fn process_message(
-    message: &str,
-    writer: &mut impl Write,
-    logger: &mut Logger,
-) -> DynResult<HandledMessage> {
-    logger.log(message)?;
-
-    let decoded = match rpc::decode(message) {
-        Ok(d) => d,
-        Err(err) => {
-            logger.log(&err.to_string())?;
-            return Ok(HandledMessage {
-                shutdown_received: false,
-                should_exit: false,
-            });
-        }
-    };
+    let decoded = rpc::decode(scanner)?;
 
     handle_message(
         decoded.id,
@@ -264,8 +206,8 @@ mod tests {
     };
 
     fn test_message(message: Vec<u8>) -> Vec<u8> {
-        let decoded = rpc::decode(&String::from_utf8(message).expect("request is invalid utf-8"))
-            .expect("invalid request");
+        let mut reader = BufReader::new(&message[..]);
+        let decoded = rpc::decode(&mut reader).expect("invalid request");
 
         let id = decoded.id;
         let method = decoded.method;
@@ -314,8 +256,8 @@ mod tests {
     }
 
     fn assert_message_eq<T: serde::Serialize>(message: Vec<u8>, expected: T) {
-        message
-            .should()
-            .be_equal_to(rpc::encode(expected).expect("Failed to encode"));
+        let mut bytes = rpc::encode(expected).expect("Failed to encode");
+        bytes.push(b'\n');
+        message.should().be_equal_to(bytes);
     }
 }
