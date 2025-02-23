@@ -26,39 +26,14 @@ pub struct DecodedMessage {
 }
 
 pub fn decode(message: &str) -> Result<DecodedMessage, Box<dyn Error>> {
-    let split = message.split("\r\n\r\n").collect::<Vec<_>>();
-
-    if split.len() != 2 {
-        return Err("Invalid message".into());
-    }
-
-    let headers = split.first().ok_or("Invalid message")?.lines();
-    let mut content_length = 0;
-
-    for header in headers {
-        if header.starts_with("content-length") {
-            content_length = header.split(": ").collect::<Vec<_>>()[1].parse()?;
-        }
-    }
-
-    if content_length == 0 {
-        return Err("Invalid message".into());
-    }
-
-    let content = split
-        .get(1)
-        .ok_or("Invalid message")?
-        .bytes()
-        .take(content_length)
-        .collect::<Vec<_>>();
-
-    let id = from_slice::<Id>(&content).ok();
-    let method = from_slice::<Method>(&content)?;
+    let content = message.as_bytes();
+    let id = from_slice::<Id>(content).ok();
+    let method = from_slice::<Method>(content)?;
 
     Ok(DecodedMessage {
         id: id.map(|id| id.id),
         method: method.method,
-        content,
+        content: content.to_vec(),
     })
 }
 
@@ -78,7 +53,7 @@ mod tests {
 
     #[test]
     fn test_decode() {
-        let message = "content-length: 25\r\n\r\n{\"id:\"0\",\"method\":\"test\"}";
+        let message = "{\"id:\"0\",\"method\":\"test\"}";
         let decoded = decode(message).unwrap();
         decoded.id.should().be_equal_to(Some("0".to_string()));
         decoded.method.should().be_equal_to("test");

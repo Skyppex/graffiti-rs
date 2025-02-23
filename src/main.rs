@@ -17,7 +17,9 @@ use clap::Parser;
 use cli::Cli;
 use path_utils::get_path;
 
-fn main() -> Result<(), Box<dyn Error>> {
+type DynResult<T> = Result<T, Box<dyn Error>>;
+
+fn main() -> DynResult<()> {
     let cli = Cli::parse();
 
     let mut logger = get_logger(&cli)?;
@@ -25,56 +27,18 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let stdin = io::stdin();
     let reader = stdin.lock();
-    let scanner = BufReader::new(reader);
+    let mut scanner = BufReader::new(reader);
 
     let mut writer = io::stdout();
 
     let mut shutting_down = false;
 
-    for line in scanner.lines() {
-        match line {
-            Ok(bytes) => {
-                if bytes == "q" {
-                    shutting_down = true;
-                    break;
-                }
-
-                let message = if bytes.starts_with("read") {
-                    let file = bytes.chars().skip(5).collect::<String>();
-                    let file_ext = format!("{}.jsonrpc", file);
-                    let path_buf = get_path(&file_ext)?;
-
-                    if path_buf.exists() {
-                        String::from_utf8(
-                            File::open(path_buf)?
-                                .bytes()
-                                .collect::<Result<Vec<u8>, _>>()?,
-                        )?
-                    } else {
-                        eprintln!("File {:?} not found", path_buf);
-                        continue;
-                    }
-                } else {
-                    bytes
-                };
-
-                let decoded = rpc::decode(&message);
-
-                if let Err(err) = decoded {
-                    logger.log(&err.to_string())?;
-                    continue;
-                }
-
-                let decoded = decoded.unwrap();
-                let id = decoded.id;
-                let method = decoded.method;
-                let content = decoded.content;
-
-                let HandledMessage {
-                    should_exit,
-                    shutdown_received,
-                } = handle_message(id, &method, &content, &mut writer, &mut logger)?;
-
+    loop {
+        match handle_input(&mut scanner, &mut writer, &mut logger) {
+            Ok(HandledMessage {
+                shutdown_received,
+                should_exit,
+            }) => {
                 if shutdown_received {
                     shutting_down = true;
                 }
@@ -85,7 +49,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             Err(err) => {
                 logger.log(&err.to_string())?;
-                continue;
             }
         }
     }
@@ -98,13 +61,91 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 }
 
+fn handle_input(
+    scanner: &mut BufReader<impl Read>,
+    writer: &mut impl Write,
+    logger: &mut Logger,
+) -> DynResult<HandledMessage> {
+    // Try to read headers
+    match read_headers(scanner) {
+        Ok(content_length) => {
+            // Read exact content
+            let mut buffer = vec![0; content_length];
+            scanner.read_exact(&mut buffer)?;
+            let message =
+                String::from_utf8(buffer).map_err(|_| "Invalid UTF-8 in message content")?;
+
+            process_message(&message, writer, logger)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn read_headers(scanner: &mut BufReader<impl Read>) -> DynResult<usize> {
+    let mut content_length = None;
+
+    // Read all headers
+    loop {
+        let mut line = String::new();
+        scanner.read_line(&mut line)?;
+        eprintln!("{}", &line);
+
+        // Empty line (just \r\n) marks end of headers
+        if line == "\r\n" {
+            eprintln!("empty line");
+            break;
+        }
+
+        eprintln!("found header");
+        // Parse content-length if we find it
+        if line.to_lowercase().starts_with("content-length: ") {
+            content_length = Some(
+                line[15..]
+                    .trim()
+                    .parse()
+                    .map_err(|_| "Invalid content-length value")?,
+            );
+        }
+    }
+
+    eprintln!("content_length is {:?}", content_length);
+    content_length.ok_or("No content-length header found".into())
+}
+
+fn process_message(
+    message: &str,
+    writer: &mut impl Write,
+    logger: &mut Logger,
+) -> DynResult<HandledMessage> {
+    logger.log(message)?;
+
+    let decoded = match rpc::decode(message) {
+        Ok(d) => d,
+        Err(err) => {
+            logger.log(&err.to_string())?;
+            return Ok(HandledMessage {
+                shutdown_received: false,
+                should_exit: false,
+            });
+        }
+    };
+
+    handle_message(
+        decoded.id,
+        &decoded.method,
+        &decoded.content,
+        writer,
+        logger,
+    )
+}
+
 fn handle_message(
     id: Option<String>,
     method: &str,
     content: &[u8],
     writer: &mut dyn Write,
     _logger: &mut Logger,
-) -> Result<HandledMessage, Box<dyn Error>> {
+) -> DynResult<HandledMessage> {
     match method {
         "initialize" => {
             let params = rpc::decode_params::<csp::InitializeRequest>(content)?;
@@ -164,7 +205,7 @@ fn handle_message(
     }
 }
 
-fn get_logger(cli: &Cli) -> Result<Logger, Box<dyn Error>> {
+fn get_logger(cli: &Cli) -> DynResult<Logger> {
     if cli.log_to_stderr {
         return Ok(Logger::new(Box::new(io::stderr())));
     }
@@ -192,7 +233,7 @@ impl Logger {
         }
     }
 
-    pub fn log(&mut self, message: &str) -> Result<(), Box<dyn Error>> {
+    pub fn log(&mut self, message: &str) -> DynResult<()> {
         if let Some(ref mut writer) = self.writer {
             return writeln!(
                 writer,

@@ -261,7 +261,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "graffiti"
+name = "graffiti-rs"
 version = "0.1.0"
 dependencies = [
  "chrono",
