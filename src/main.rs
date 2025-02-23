@@ -10,7 +10,7 @@ use std::{
 };
 
 use chrono::Local;
-use csp::{InitializeResponse, Response};
+use csp::{InitializeResponse, Response, ShutdownResponse};
 
 use clap::Parser;
 use cli::Cli;
@@ -134,10 +134,10 @@ fn process_message(
 }
 
 fn handle_message(
-    id: String,
+    id: Option<String>,
     method: &str,
     _content: &[u8],
-    writer: &mut dyn Write,
+    writer: &mut impl Write,
     _logger: &mut Logger,
 ) -> DynResult<HandledMessage> {
     match method {
@@ -145,7 +145,7 @@ fn handle_message(
             // let params = rpc::decode_params::<csp::InitializeRequest>(content)?;
 
             let response = rpc::encode(Response::<InitializeResponse> {
-                id,
+                id: id.expect("Request ID is missing"),
                 result: Some(InitializeResponse {
                     server_info: Some(csp::ServerInfo {
                         name: "graffiti-rs".to_string(),
@@ -174,10 +174,20 @@ fn handle_message(
             should_exit: false,
             shutdown_received: false,
         }),
-        "shutdown" => Ok(HandledMessage {
-            should_exit: false,
-            shutdown_received: true,
-        }),
+        "shutdown" => {
+            let response = rpc::encode(Response::<ShutdownResponse> {
+                id: id.expect("Request ID is missing"),
+                result: None,
+            })?;
+
+            writer.write_all(&response)?;
+            writeln!(writer)?;
+
+            Ok(HandledMessage {
+                should_exit: false,
+                shutdown_received: true,
+            })
+        }
         "exit" => Ok(HandledMessage {
             should_exit: true,
             shutdown_received: false,
