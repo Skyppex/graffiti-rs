@@ -9,7 +9,7 @@ pub struct Request<T> {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Response<T> {
-    pub id: Option<String>,
+    pub id: String,
     pub result: Option<T>,
     // pub error: (),
 }
@@ -22,11 +22,8 @@ pub struct Notification<T> {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct InitializeRequest {
-    #[serde(rename = "processId")]
     pub process_id: Option<i32>,
-    #[serde(rename = "clientInfo")]
     pub client_info: Option<ClientInfo>,
-    #[serde(rename = "rootPath")]
     pub root_path: Option<String>,
     // #[serde(rename = "initializeOptions")]
     // initialize_options: Option<InitializeOptions>,

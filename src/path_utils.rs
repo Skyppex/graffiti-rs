@@ -3,6 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[allow(dead_code)]
 pub fn get_path(path: &str) -> Result<PathBuf> {
     let path = match path {
         p if p.starts_with("~") => dirs::home_dir()

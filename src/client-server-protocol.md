@@ -123,11 +123,11 @@ interface Notification {
 
 ```graphql
 type InitializeParams {
-  processId: Int
-  clientInfo: ClientInfo
-  rootPath: String
+  process_id: Int
+  client_info: ClientInfo
+  root_path: String
   # user provided initialization options
-  initializeOptions: Object
+  initialize_options: Object
 }
 
 type ClientInfo {
@@ -135,5 +135,3 @@ type ClientInfo {
   version: String
 }
 ```
-
-#### initialized - response

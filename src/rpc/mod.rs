@@ -20,18 +20,18 @@ struct Params<T> {
 
 #[derive(Debug, Clone)]
 pub struct DecodedMessage {
-    pub id: Option<String>,
+    pub id: String,
     pub method: String,
     pub content: Vec<u8>,
 }
 
 pub fn decode(message: &str) -> Result<DecodedMessage, Box<dyn Error>> {
     let content = message.as_bytes();
-    let id = from_slice::<Id>(content).ok();
+    let id = from_slice::<Id>(content)?;
     let method = from_slice::<Method>(content)?;
 
     Ok(DecodedMessage {
-        id: id.map(|id| id.id),
+        id: id.id,
         method: method.method,
         content: content.to_vec(),
     })
@@ -55,7 +55,7 @@ mod tests {
     fn test_decode() {
         let message = "{\"id:\"0\",\"method\":\"test\"}";
         let decoded = decode(message).unwrap();
-        decoded.id.should().be_equal_to(Some("0".to_string()));
+        decoded.id.should().be_equal_to("0".to_string());
         decoded.method.should().be_equal_to("test");
         decoded.content.len().should().be_equal_to(25);
     }

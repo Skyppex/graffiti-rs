@@ -5,7 +5,6 @@ mod rpc;
 
 use std::{
     error::Error,
-    fs::File,
     io::{self, BufRead, BufReader, Read, Write},
     process,
 };
@@ -15,7 +14,6 @@ use csp::{InitializeResponse, Response};
 
 use clap::Parser;
 use cli::Cli;
-use path_utils::get_path;
 
 type DynResult<T> = Result<T, Box<dyn Error>>;
 
@@ -140,7 +138,7 @@ fn process_message(
 }
 
 fn handle_message(
-    id: Option<String>,
+    id: String,
     method: &str,
     content: &[u8],
     writer: &mut dyn Write,
@@ -302,7 +300,7 @@ mod tests {
         assert_message_eq(
             response,
             Response::<InitializeResponse> {
-                id: Some("1".to_string()),
+                id: "1".to_string(),
                 result: Some(InitializeResponse {
                     server_info: Some(crate::csp::ServerInfo {
                         name: "graffiti-rs".to_string(),
