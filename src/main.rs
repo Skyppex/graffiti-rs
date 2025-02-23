@@ -86,15 +86,12 @@ fn read_headers(scanner: &mut BufReader<impl Read>) -> DynResult<usize> {
     loop {
         let mut line = String::new();
         scanner.read_line(&mut line)?;
-        eprintln!("{}", &line);
 
         // Empty line (just \r\n) marks end of headers
         if line == "\r\n" {
-            eprintln!("empty line");
             break;
         }
 
-        eprintln!("found header");
         // Parse content-length if we find it
         if line.to_lowercase().starts_with("content-length: ") {
             content_length = Some(
@@ -106,7 +103,6 @@ fn read_headers(scanner: &mut BufReader<impl Read>) -> DynResult<usize> {
         }
     }
 
-    eprintln!("content_length is {:?}", content_length);
     content_length.ok_or("No content-length header found".into())
 }
 
@@ -140,15 +136,13 @@ fn process_message(
 fn handle_message(
     id: String,
     method: &str,
-    content: &[u8],
+    _content: &[u8],
     writer: &mut dyn Write,
     _logger: &mut Logger,
 ) -> DynResult<HandledMessage> {
     match method {
         "initialize" => {
-            let params = rpc::decode_params::<csp::InitializeRequest>(content)?;
-
-            dbg!(params);
+            // let params = rpc::decode_params::<csp::InitializeRequest>(content)?;
 
             let response = rpc::encode(Response::<InitializeResponse> {
                 id,
@@ -169,9 +163,7 @@ fn handle_message(
             })
         }
         "cursor_moved" => {
-            let params = rpc::decode_params::<csp::CursorMovedNotification>(content)?;
-
-            dbg!(params);
+            // let params = rpc::decode_params::<csp::CursorMovedNotification>(content)?;
 
             Ok(HandledMessage {
                 should_exit: false,
