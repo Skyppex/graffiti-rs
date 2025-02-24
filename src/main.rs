@@ -32,9 +32,9 @@ async fn main() -> DynResult<()> {
             logger.log("Starting host mode")?;
             tokio::spawn(run_host(logger.clone()))
         }
-        Commands::Connect => {
+        Commands::Connect { sha } => {
             logger.log("Starting client mode")?;
-            tokio::spawn(run_client(logger.clone()))
+            tokio::spawn(run_client(sha, logger.clone()))
         }
     };
 

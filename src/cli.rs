@@ -20,5 +20,5 @@ pub enum Commands {
     /// Start as a host
     Host,
     /// Connect to a host
-    Connect,
+    Connect { sha: String },
 }
