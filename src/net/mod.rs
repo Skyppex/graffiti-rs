@@ -17,7 +17,10 @@ use tokio_tungstenite::{
     Connector,
 };
 
-use crate::{DynResult, Log, Logger};
+use crate::{
+    ppp::{receive, send},
+    DynResult, Log, Logger,
+};
 
 struct CertData {
     certs: Vec<CertificateDer<'static>>,
@@ -75,21 +78,15 @@ pub async fn run_host(mut logger: Arc<Mutex<Logger>>) -> DynResult<()> {
 
     let (mut write, mut read) = ws_stream.split();
 
-    // Send a test message
-    write.send(Message::Text("Hello from host!".into())).await?;
-
     // Handle incoming messages
     while let Some(msg) = read.next().await {
-        match msg? {
-            Message::Text(text) => {
-                logger.log(&format!("Received message: {}", text))?;
-            }
-            Message::Close(_) => {
-                logger.log("Client disconnected")?;
-                break;
-            }
-            _ => {}
+        let msg = msg?;
+        if let Message::Close(_) = msg {
+            logger.log("Client disconnected")?;
+            break;
         }
+
+        receive::handle_message(msg, &mut write, logger.clone()).await?;
     }
 
     Ok(())
@@ -113,23 +110,19 @@ pub async fn run_client(fingerprint: String, mut logger: Arc<Mutex<Logger>>) -> 
     logger.log("Reconnected with pinned certificate")?;
 
     let (mut write, mut read) = ws_stream.split();
+
     // Send a test message
-    write
-        .send(Message::Text("Hello from client!".into()))
-        .await?;
+    send::initialize(&mut write).await?;
 
     // Handle incoming messages
     while let Some(msg) = read.next().await {
-        match msg? {
-            Message::Text(text) => {
-                logger.log(&format!("Received message: {}", text))?;
-            }
-            Message::Close(_) => {
-                logger.log("Server disconnected")?;
-                break;
-            }
-            _ => {}
+        let msg = msg?;
+        if let Message::Close(_) = msg {
+            logger.log("Server stopped")?;
+            break;
         }
+
+        receive::handle_message(msg, &mut write, logger.clone()).await?;
     }
 
     Ok(())

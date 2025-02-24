@@ -21,13 +21,20 @@ struct Params<T> {
 }
 
 #[derive(Debug, Clone)]
-pub struct DecodedMessage {
+pub struct MessageInfo {
     pub id: Option<String>,
     pub method: String,
     pub content: Vec<u8>,
 }
 
-pub fn decode(scanner: &mut BufReader<impl Read>) -> DynResult<DecodedMessage> {
+#[derive(Debug, Clone)]
+pub struct NetMessageInfo {
+    pub id: Option<String>,
+    pub method: Option<String>,
+    pub content: Vec<u8>,
+}
+
+pub fn decode(scanner: &mut BufReader<impl Read>) -> DynResult<MessageInfo> {
     let message = match read_headers(scanner) {
         Ok(content_length) => {
             // Read exact content
@@ -42,9 +49,33 @@ pub fn decode(scanner: &mut BufReader<impl Read>) -> DynResult<DecodedMessage> {
     let id = from_slice::<Id>(content).ok();
     let method = from_slice::<Method>(content)?;
 
-    Ok(DecodedMessage {
+    Ok(MessageInfo {
         id: id.map(|id| id.id),
         method: method.method,
+        content: content.to_vec(),
+    })
+}
+
+pub fn decode_message(message: String) -> DynResult<NetMessageInfo> {
+    let scanner = &mut BufReader::new(message.as_bytes());
+
+    let message = match read_headers(scanner) {
+        Ok(content_length) => {
+            // Read exact content
+            let mut buffer = vec![0; content_length];
+            scanner.read_exact(&mut buffer)?;
+            String::from_utf8(buffer).map_err(|_| "Invalid UTF-8 in message content")?
+        }
+        Err(e) => return Err(e),
+    };
+
+    let content = message.as_bytes();
+    let id = from_slice::<Id>(content).ok();
+    let method = from_slice::<Method>(content).ok();
+
+    Ok(NetMessageInfo {
+        id: id.map(|id| id.id),
+        method: method.map(|method| method.method),
         content: content.to_vec(),
     })
 }

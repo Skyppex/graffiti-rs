@@ -2,6 +2,7 @@ mod cli;
 mod csp;
 mod net;
 mod path_utils;
+mod ppp;
 mod rpc;
 
 use std::{
