@@ -10,7 +10,7 @@ dirs = "6.0.0"
 rustls = { version = "0.23.23", features = ["log", "logging", "ring", "std", "tls12"], default-features = false }
 serde = { version = "1.0.215", features = ["derive"] }
 serde_json = "1.0.133"
-tokio = { version = "1.43.0", features = ["macros", "rt", "rt-multi-thread"] }
+tokio = { version = "1.43.0", features = ["macros", "rt", "rt-multi-thread", "sync"] }
 tokio-tungstenite = { version= "0.26.2", features = ["rustls", "rustls-tls-native-roots"] }
 futures-util = "0.3.31"
 rcgen = "0.13.2"

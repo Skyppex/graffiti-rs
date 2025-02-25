@@ -1,3 +1,6 @@
+pub mod receive;
+pub mod send;
+
 use std::sync::{Arc, Mutex};
 
 use futures_util::{SinkExt, StreamExt};
@@ -9,7 +12,10 @@ use rustls::{
     ClientConfig, ServerConfig, SignatureScheme,
 };
 use sha2::{Digest, Sha256};
-use tokio::net::TcpListener;
+use tokio::{
+    net::TcpListener,
+    sync::mpsc::{Receiver, Sender},
+};
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::{
     accept_async_with_config, connect_async_tls_with_config,
@@ -17,10 +23,7 @@ use tokio_tungstenite::{
     Connector,
 };
 
-use crate::{
-    ppp::{receive, send},
-    DynResult, Log, Logger,
-};
+use crate::{ppp, DynResult, Log, Logger};
 
 struct CertData {
     certs: Vec<CertificateDer<'static>>,
@@ -46,7 +49,11 @@ fn generate_cert() -> CertData {
     }
 }
 
-pub async fn run_host(mut logger: Arc<Mutex<Logger>>) -> DynResult<()> {
+pub async fn run_host(
+    sender: Sender<send::Message>,
+    mut receiver: Receiver<receive::Message>,
+    mut logger: Arc<Mutex<Logger>>,
+) -> DynResult<()> {
     let cert_data = generate_cert();
     let fingerprint = compute_fingerprint(&cert_data.certs[0]);
     logger.log(&format!("Fingerprint: {}", fingerprint))?;
@@ -78,21 +85,57 @@ pub async fn run_host(mut logger: Arc<Mutex<Logger>>) -> DynResult<()> {
 
     let (mut write, mut read) = ws_stream.split();
 
-    // Handle incoming messages
-    while let Some(msg) = read.next().await {
-        let msg = msg?;
-        if let Message::Close(_) = msg {
-            logger.log("Client disconnected")?;
-            break;
-        }
+    let mut shutdown_id = None;
 
-        receive::handle_message(msg, &mut write, logger.clone()).await?;
+    loop {
+        tokio::select! {
+            // Handle websocket messages
+            Some(msg) = read.next() => {
+                logger.log(&format!("Received from client: {:?}", msg))?;
+
+                if msg.is_err() {
+                    break;
+                }
+
+                let msg = msg?;
+
+                if let Message::Close(_) = msg {
+                    logger.log("Client disconnected")?;
+                    break;
+                }
+
+                ppp::receive::handle_message(msg, &mut write, logger.clone()).await?;
+            }
+            // Handle channel messages
+            Some(msg) = receiver.recv() => {
+                logger.log(&format!("Received from main: {}", msg))?;
+
+                if let receive::Message::Shutdown(id) = msg {
+                    logger.log("Shutting down")?;
+                    write.send(Message::Close(None)).await?;
+                    shutdown_id = Some(id);
+                }
+            }
+        }
     }
+
+    logger.log("Websocket connection closed")?;
+    write.close().await?;
+    logger.log("closed websocket sink")?;
+    sender.send(send::Message::Shutdown(shutdown_id)).await?;
+    logger.log("shutdown sent to main")?;
+
+    logger.log(&format!("sender is closed: {}", sender.is_closed()))?;
 
     Ok(())
 }
 
-pub async fn run_client(fingerprint: String, mut logger: Arc<Mutex<Logger>>) -> DynResult<()> {
+pub async fn run_client(
+    fingerprint: String,
+    sender: Sender<send::Message>,
+    mut receiver: Receiver<receive::Message>,
+    mut logger: Arc<Mutex<Logger>>,
+) -> DynResult<()> {
     let url = "wss://127.0.0.1:8080".parse::<Uri>()?;
     logger.log(&format!("Connecting to {}", url))?;
 
@@ -107,23 +150,55 @@ pub async fn run_client(fingerprint: String, mut logger: Arc<Mutex<Logger>>) -> 
 
     let (ws_stream, _) =
         connect_async_tls_with_config(url, None, false, Some(tls_connector)).await?;
-    logger.log("Reconnected with pinned certificate")?;
+
+    logger.log("Connected with pinned certificate")?;
 
     let (mut write, mut read) = ws_stream.split();
 
     // Send a test message
-    send::initialize(&mut write).await?;
+    ppp::send::initialize(&mut write).await?;
 
-    // Handle incoming messages
-    while let Some(msg) = read.next().await {
-        let msg = msg?;
-        if let Message::Close(_) = msg {
-            logger.log("Server stopped")?;
-            break;
+    let mut shutdown_id = None;
+
+    loop {
+        tokio::select! {
+            // Handle incoming messages
+            Some(msg) = read.next() => {
+                logger.log(&format!("Received from host: {:?}", msg))?;
+
+                if msg.is_err() {
+                    break;
+                }
+
+                let msg = msg?;
+
+                if let Message::Close(_) = msg {
+                    logger.log("Disconnected by server")?;
+                    break;
+                }
+
+                ppp::receive::handle_message(msg, &mut write, logger.clone()).await?;
+            }
+            // Handle channel messages
+            Some(msg) = receiver.recv() => {
+                logger.log(&format!("Received from main: {}", msg))?;
+
+                if let receive::Message::Shutdown(id) = msg {
+                    logger.log("Shutting down")?;
+                    write.send(Message::Close(None)).await?;
+                    shutdown_id = Some(id);
+                }
+            }
         }
-
-        receive::handle_message(msg, &mut write, logger.clone()).await?;
     }
+
+    logger.log("Websocket connection closed")?;
+    write.close().await?;
+    logger.log("closed websocket sink")?;
+    sender.send(send::Message::Shutdown(shutdown_id)).await?;
+    logger.log("shutdown sent to main")?;
+
+    logger.log(&format!("sender is closed: {}", sender.is_closed()))?;
 
     Ok(())
 }
