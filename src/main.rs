@@ -50,71 +50,70 @@ async fn main() -> DynResult<()> {
     };
 
     let stdin = io::stdin();
-    let reader = stdin.lock();
-    let mut scanner = BufReader::new(reader);
+    let mut scanner = BufReader::new(stdin);
 
     let mut writer = io::stdout();
 
+    logger.log("Entering main message loop")?;
+
     let mut shutting_down = false;
 
-    logger.log("Entering main message loop")?;
     loop {
-        logger.log("Starting select interation")?;
         tokio::select! {
-            // Handle stdin
-            _ = async {
-                match handle_input(&mut scanner, &mut writer, &send_to_thread, logger.clone()).await {
-                    Ok(HandledMessage {
-                        shutdown_received,
-                        should_exit,
-                    }) => {
-                        if shutdown_received {
-                            shutting_down = true;
-                        }
-
-                        if should_exit {
-                            return Ok(true);
-                        }
-                    }
-                    Err(err) => {
-                        logger.log(&err.to_string())?;
-                    }
-                }
-
-                // type annotations are required here, the rest can be inferred
-                Ok::<_, DynError>(false)
-            } => {
-                if shutting_down {
-                    break;
-                }
-            }
+            biased;
 
             // Handle messages from the network thread
-            Some(message) = receive_from_thread.recv() => {
+            Some(message) = {
+                logger.log("Waiting for message from network")?;
+                receive_from_thread.recv()
+            } => {
                 logger.log(&format!("Received from network: {}", message))?;
                 // Handle the message here
                 // You might want to send responses back using send_thread
-                if let net::send::Message::Shutdown(id) = message {
-                    if let Some(id) = id {
-                        let response = rpc::encode(Response::<ShutdownResponse> {
-                            id,
-                            result: None,
-                        })?;
+                if let net::send::Message::Shutdown(Some(id)) = message {
+                    let response = rpc::encode(Response::<ShutdownResponse> {
+                        id,
+                        result: None,
+                    })?;
 
-                        logger.log("Sending shutdown response to editor")?;
-                        writer.write_all(&response)?;
-                        writeln!(writer)?;
-                        logger.log("Sent shutdown response to editor")?;
-                    }
+                    logger.log("Sending shutdown response to editor")?;
+                    writer.write_all(&response)?;
+                    writeln!(writer)?;
+                    logger.log("Sent shutdown response to editor")?;
+                    shutting_down = true;
+                }
+            }
 
+            // Handle stdin
+            Ok(HandledMessage {
+                shutdown_received,
+                should_exit,
+            }) = {
+                logger.log("Waiting for input from editor")?;
+                handle_input(&mut scanner, &mut writer, &send_to_thread, logger.clone())
+            } => {
+                logger.log("Handled input")?;
+                if shutdown_received {
+                    logger.log("Shutdown received from editor")?;
+                    shutting_down = true;
+                    break; // for test, just break immediately. should continue
+                }
+
+                if should_exit {
                     break;
                 }
             }
+
+            else => {
+                // Just restart the loop so we stay responsive to new messages
+                continue; // continue to avoid log
+            }
         }
+
         logger.log("Finished select iteration")?;
     }
 
-    network_handle.abort();
+    network_handle.await??;
 
     if !shutting_down {
         logger.log("Exiting without shutdown message")?;
@@ -129,8 +128,9 @@ async fn handle_input(
     scanner: &mut BufReader<impl Read>,
     writer: &mut impl Write,
     sender: &Sender<net::receive::Message>,
-    logger: Arc<Mutex<Logger>>,
+    mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<HandledMessage> {
+    logger.log("Handling input from editor")?;
     let decoded = rpc::decode(scanner)?;
 
     handle_message(
