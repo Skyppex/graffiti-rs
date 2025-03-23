@@ -1,7 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use futures_util::SinkExt;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::{io::{AsyncRead, AsyncWrite}, sync::Mutex};
 use tokio_tungstenite::tungstenite::{Message, Utf8Bytes};
 
 use crate::{rpc, DynResult, Log, Logger};
@@ -16,14 +16,14 @@ pub async fn handle_message<S: AsyncWrite + AsyncRead + Unpin>(
     mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
     if let Message::Text(text) = msg {
-        logger.log(&format!("Received message: {}", text))?;
+        logger.log(&format!("Received message: {}", text)).await?;
 
-        let decoded = rpc::decode_message(text.to_string())?;
+        let decoded = rpc::decode_message(text.to_string()).await?;
 
         let id = decoded.id;
         let method = decoded.method;
 
-        logger.log(&format!("Method: {:?}", method))?;
+        logger.log(&format!("Method: {:?}", method)).await?;
 
         match (id, method) {
             (Some(id), Some(method)) => handle_request(id, &method, decoded.content, write).await?,

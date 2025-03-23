@@ -4,6 +4,7 @@ use std::fmt::Display;
 pub enum Message {
     Shutdown(Option<String>),
     Ping(String),
+    Fingerprint(String),
 }
 
 impl Display for Message {
@@ -11,6 +12,7 @@ impl Display for Message {
         match self {
             Message::Shutdown(id) => write!(f, "shutdown: {:?}", id),
             Message::Ping(value) => write!(f, "ping: {}", value),
+            Message::Fingerprint(value) => write!(f, "fingerprint: {}", value),
         }
     }
 }

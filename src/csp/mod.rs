@@ -50,10 +50,26 @@ pub struct ServerInfo {
 pub struct InitializedNotification;
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct FingerprintGeneratedNotification {
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ShutdownRequest;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ShutdownResponse;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ExitNotification;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FingerprintRequest;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FingerprintResponse {
+    pub fingerprint: String,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CursorMovedNotification {

@@ -1,7 +1,7 @@
 pub mod receive;
 pub mod send;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
 
@@ -14,7 +14,10 @@ use rustls::{
 use sha2::{Digest, Sha256};
 use tokio::{
     net::TcpListener,
-    sync::mpsc::{Receiver, Sender},
+    sync::{
+        mpsc::{Receiver, Sender},
+        Mutex,
+    },
 };
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::{
@@ -54,17 +57,11 @@ pub async fn run_host(
     mut receiver: Receiver<receive::Message>,
     mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
-    logger.log("Sending ping")?;
-    sender.send(send::Message::Ping("1".to_owned())).await?;
-    logger.log("Sent ping")?;
-
     let cert_data = generate_cert();
     let fingerprint = compute_fingerprint(&cert_data.certs[0]);
-    logger.log(&format!("Fingerprint: {}", fingerprint))?;
+    logger.log(&format!("Fingerprint: {}", fingerprint)).await?;
 
-    logger.log("Sending ping")?;
-    sender.send(send::Message::Ping("2".to_owned())).await?;
-    logger.log("Sent ping")?;
+    sender.send(send::Message::Fingerprint(fingerprint)).await?;
 
     let tls_config = ServerConfig::builder()
         .with_no_client_auth()
@@ -72,50 +69,36 @@ pub async fn run_host(
 
     let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
 
-    let listener = TcpListener::bind("0.0.0.0:8080").await?; // Bind to all interfaces
-    logger.log("Listening on 0.0.0.0:8080")?;
+    let listener = TcpListener::bind("0.0.0.0:8080").await?;
+    logger.log("Listening on 0.0.0.0:8080").await?;
 
     let (socket, addr) = listener.accept().await?;
-    logger.log(&format!("Client connected from: {}", addr))?;
+    logger
+        .log(&format!("Client connected from: {}", addr))
+        .await?;
 
     let tls_stream = match tls_acceptor.accept(socket).await {
         Ok(s) => s,
         Err(e) => {
-            logger.log(&format!("TLS error: {:?}", e))?;
+            logger.log(&format!("TLS error: {:?}", e)).await?;
             return Ok(());
         }
     };
 
-    logger.log("Sending ping")?;
-    sender.send(send::Message::Ping("3".to_owned())).await?;
-    logger.log("Sent ping")?;
-
-    logger.log("TLS connection established")?;
+    logger.log("TLS connection established").await?;
 
     let ws_stream = accept_async_with_config(tls_stream, None).await?;
-    logger.log("WebSocket connection established")?;
-
-    logger.log("Sending ping")?;
-    sender.send(send::Message::Ping("4".to_owned())).await?;
-    logger.log("Sent ping")?;
+    logger.log("WebSocket connection established").await?;
 
     let (mut write, mut read) = ws_stream.split();
 
     let mut shutdown_id = None;
 
-    logger.log("Sending ping")?;
-    sender.send(send::Message::Ping("5".to_owned())).await?;
-    logger.log("Sent ping")?;
-
     loop {
         tokio::select! {
             // Handle websocket messages
             Some(msg) = read.next() => {
-                logger.log(&format!("Received from client: {:?}", msg))?;
-                logger.log("Sending ping")?;
-                sender.send(send::Message::Ping("6".to_owned())).await?;
-                logger.log("Sent ping")?;
-
+                logger.log(&format!("Received from client: {:?}", msg)).await?;
 
                 if msg.is_err() {
                     break;
@@ -124,7 +107,7 @@ pub async fn run_host(
                 let msg = msg?;
 
                 if let Message::Close(_) = msg {
-                    logger.log("Client disconnected")?;
+                    logger.log("Client disconnected").await?;
                     break;
                 }
 
@@ -132,14 +115,10 @@ pub async fn run_host(
             }
             // Handle channel messages
             Some(msg) = receiver.recv() => {
-                logger.log(&format!("Received from main: {}", msg))?;
-
-                logger.log("Sending ping")?;
-                sender.send(send::Message::Ping("7".to_owned())).await?;
-                logger.log("Sent ping")?;
+                logger.log(&format!("Received from main: {}", msg)).await?;
 
                 if let receive::Message::Shutdown(id) = msg {
-                    logger.log("Shutting down")?;
+                    logger.log("Shutting down").await?;
                     write.send(Message::Close(None)).await?;
                     shutdown_id = Some(id);
                 }
@@ -147,15 +126,11 @@ pub async fn run_host(
         }
     }
 
-    logger.log("Sending ping")?;
-    sender.send(send::Message::Ping("8".to_owned())).await?;
-    logger.log("Sent ping")?;
-
-    logger.log("Websocket connection closed")?;
+    logger.log("Websocket connection closed").await?;
     write.close().await?;
-    logger.log("closed websocket sink")?;
+    logger.log("closed websocket sink").await?;
     sender.send(send::Message::Shutdown(shutdown_id)).await?;
-    logger.log("shutdown sent to main")?;
+    logger.log("shutdown sent to main").await?;
 
     Ok(())
 }
@@ -167,7 +142,7 @@ pub async fn run_client(
     mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
     let url = "wss://127.0.0.1:8080".parse::<Uri>()?;
-    logger.log(&format!("Connecting to {}", url))?;
+    logger.log(&format!("Connecting to {}", url)).await?;
 
     let verifier = FingerprintVerifier::new(hex::decode(fingerprint)?);
 
@@ -181,7 +156,7 @@ pub async fn run_client(
     let (ws_stream, _) =
         connect_async_tls_with_config(url, None, false, Some(tls_connector)).await?;
 
-    logger.log("Connected with pinned certificate")?;
+    logger.log("Connected with pinned certificate").await?;
 
     let (mut write, mut read) = ws_stream.split();
 
@@ -194,7 +169,7 @@ pub async fn run_client(
         tokio::select! {
             // Handle incoming messages
             Some(msg) = read.next() => {
-                logger.log(&format!("Received from host: {:?}", msg))?;
+                logger.log(&format!("Received from host: {:?}", msg)).await?;
 
                 if msg.is_err() {
                     break;
@@ -203,7 +178,7 @@ pub async fn run_client(
                 let msg = msg?;
 
                 if let Message::Close(_) = msg {
-                    logger.log("Disconnected by server")?;
+                    logger.log("Disconnected by server").await?;
                     break;
                 }
 
@@ -211,10 +186,10 @@ pub async fn run_client(
             }
             // Handle channel messages
             Some(msg) = receiver.recv() => {
-                logger.log(&format!("Received from main: {}", msg))?;
+                logger.log(&format!("Received from main: {}", msg)).await?;
 
                 if let receive::Message::Shutdown(id) = msg {
-                    logger.log("Shutting down")?;
+                    logger.log("Shutting down").await?;
                     write.send(Message::Close(None)).await?;
                     shutdown_id = Some(id);
                 }
@@ -222,11 +197,11 @@ pub async fn run_client(
         }
     }
 
-    logger.log("Websocket connection closed")?;
+    logger.log("Websocket connection closed").await?;
     write.close().await?;
-    logger.log("closed websocket sink")?;
+    logger.log("closed websocket sink").await?;
     sender.send(send::Message::Shutdown(shutdown_id)).await?;
-    logger.log("shutdown sent to main")?;
+    logger.log("shutdown sent to main").await?;
 
     Ok(())
 }
