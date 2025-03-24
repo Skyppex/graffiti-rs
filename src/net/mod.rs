@@ -3,7 +3,7 @@ pub mod send;
 
 use std::sync::Arc;
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{stream::SplitSink, SinkExt, StreamExt};
 
 use rcgen::CertifiedKey;
 use rustls::{
@@ -23,10 +23,12 @@ use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::{
     accept_async_with_config, connect_async_tls_with_config,
     tungstenite::{http::Uri, Message},
-    Connector,
+    Connector, WebSocketStream,
 };
 
 use crate::{ppp, DynResult, Log, Logger};
+
+pub type WsWriter<S> = SplitSink<WebSocketStream<S>, Message>;
 
 struct CertData {
     certs: Vec<CertificateDer<'static>>,
@@ -90,14 +92,14 @@ pub async fn run_host(
     let ws_stream = accept_async_with_config(tls_stream, None).await?;
     logger.log("WebSocket connection established").await?;
 
-    let (mut write, mut read) = ws_stream.split();
+    let (mut writer, mut reader) = ws_stream.split();
 
     let mut shutdown_id = None;
 
     loop {
         tokio::select! {
             // Handle websocket messages
-            Some(msg) = read.next() => {
+            Some(msg) = reader.next() => {
                 logger.log(&format!("Received from client: {:?}", msg)).await?;
 
                 if msg.is_err() {
@@ -111,7 +113,7 @@ pub async fn run_host(
                     break;
                 }
 
-                ppp::receive::handle_message(msg, &mut write, logger.clone()).await?;
+                ppp::receive::handle_message(msg, &mut writer, &sender, logger.clone()).await?;
             }
             // Handle channel messages
             Some(msg) = receiver.recv() => {
@@ -119,15 +121,17 @@ pub async fn run_host(
 
                 if let receive::Message::Shutdown(id) = msg {
                     logger.log("Shutting down").await?;
-                    write.send(Message::Close(None)).await?;
+                    writer.send(Message::Close(None)).await?;
                     shutdown_id = Some(id);
+                } else {
+                    receive::handle_message(msg, &mut writer, logger.clone()).await?;
                 }
             }
         }
     }
 
     logger.log("Websocket connection closed").await?;
-    write.close().await?;
+    writer.close().await?;
     logger.log("closed websocket sink").await?;
     sender.send(send::Message::Shutdown(shutdown_id)).await?;
     logger.log("shutdown sent to main").await?;
@@ -158,17 +162,17 @@ pub async fn run_client(
 
     logger.log("Connected with pinned certificate").await?;
 
-    let (mut write, mut read) = ws_stream.split();
+    let (mut writer, mut reader) = ws_stream.split();
 
     // Send a test message
-    ppp::send::initialize(&mut write).await?;
+    ppp::send::initialize(&mut writer).await?;
 
     let mut shutdown_id = None;
 
     loop {
         tokio::select! {
             // Handle incoming messages
-            Some(msg) = read.next() => {
+            Some(msg) = reader.next() => {
                 logger.log(&format!("Received from host: {:?}", msg)).await?;
 
                 if msg.is_err() {
@@ -182,7 +186,7 @@ pub async fn run_client(
                     break;
                 }
 
-                ppp::receive::handle_message(msg, &mut write, logger.clone()).await?;
+                ppp::receive::handle_message(msg, &mut writer, &sender, logger.clone()).await?;
             }
             // Handle channel messages
             Some(msg) = receiver.recv() => {
@@ -190,15 +194,17 @@ pub async fn run_client(
 
                 if let receive::Message::Shutdown(id) = msg {
                     logger.log("Shutting down").await?;
-                    write.send(Message::Close(None)).await?;
+                    writer.send(Message::Close(None)).await?;
                     shutdown_id = Some(id);
+                } else {
+                    receive::handle_message(msg, &mut writer, logger.clone()).await?;
                 }
             }
         }
     }
 
     logger.log("Websocket connection closed").await?;
-    write.close().await?;
+    writer.close().await?;
     logger.log("closed websocket sink").await?;
     sender.send(send::Message::Shutdown(shutdown_id)).await?;
     logger.log("shutdown sent to main").await?;

@@ -62,7 +62,13 @@ async fn main() -> DynResult<()> {
 
     logger.log("Entering main message loop").await?;
 
-    let state = State::new();
+    let cwd = std::env::current_dir()?;
+
+    logger
+        .log(format!("Current working directory: {:?}", cwd).as_str())
+        .await?;
+
+    let state = State::new(cwd, "0".to_string());
 
     let mut shutting_down = false;
 
@@ -109,6 +115,17 @@ async fn main() -> DynResult<()> {
                             method: "fingerprint_generated".to_string(),
                             params: Some(FingerprintGeneratedNotification {
                                 fingerprint,
+                            }),
+                        })?;
+
+                        writer.write_all(&notification).await?;
+                    }
+                    net::send::Message::CursorMoved { client_id, location } => {
+                        let notification = rpc::encode(Notification::<csp::CursorMovedNotification> {
+                            method: "cursor_moved".to_string(),
+                            params: Some(csp::CursorMovedNotification {
+                                client_id,
+                                location: location.into(),
                             }),
                         })?;
 
@@ -162,6 +179,14 @@ async fn handle_input(
     logger.log("Handling input from editor").await?;
     let decoded = rpc::decode(scanner).await?;
 
+    logger
+        .log(format!("Handling method: {}", decoded.method).as_str())
+        .await?;
+
+    logger
+        .log(format!("Content: {:?}", String::from_utf8(decoded.content.clone())).as_str())
+        .await?;
+
     handle_message(
         decoded.id,
         &decoded.method,
@@ -177,7 +202,7 @@ async fn handle_input(
 async fn handle_message(
     id: Option<String>,
     method: &str,
-    _content: &[u8],
+    content: &[u8],
     writer: &mut (impl AsyncWrite + Unpin),
     sender: &Sender<net::receive::Message>,
     state: Arc<Mutex<State>>,
@@ -205,11 +230,32 @@ async fn handle_message(
 
             Ok(HandledMessage { should_exit: false })
         }
-        "cursor_moved" => {
-            // let params = rpc::decode_params::<csp::CursorMovedNotification>(content)?;
+        "move_cursor" => {
+            logger
+                .log("Received move_cursor message from editor 11")
+                .await?;
+
+            let params = rpc::decode_params::<csp::MoveCursorNotification>(content);
+
+            if let Err(e) = params {
+                logger
+                    .log(&format!("Error decoding params: {:?}", e))
+                    .await?;
+
+                return Err(e);
+            }
+
+            let params = params.unwrap();
 
             logger
-                .log("Received cursor_moved message from editor")
+                .log("Received move_cursor message from editor 22")
+                .await?;
+
+            sender
+                .send(net::receive::Message::CursorMoved {
+                    client_id: state.lock().await.client_id.clone(),
+                    location: params.location.into(),
+                })
                 .await?;
 
             Ok(HandledMessage { should_exit: false })
@@ -334,6 +380,8 @@ pub struct HandledMessage {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use fluid::prelude::*;
 
@@ -360,7 +408,7 @@ mod tests {
             &content,
             &mut writer,
             &sender,
-            State::new(),
+            State::new(PathBuf::new(), "0".to_string()),
             logger,
         )
         .await

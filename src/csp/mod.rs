@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::ppp;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Request<T> {
     pub id: Option<String>,
@@ -72,14 +74,29 @@ pub struct FingerprintResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct MoveCursorNotification {
+    pub location: DocumentLocation,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CursorMovedNotification {
     pub client_id: String,
     pub location: DocumentLocation,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DocumentLocation {
     pub uri: String,
-    pub line: i32,
-    pub column: i32,
+    pub line: u32,
+    pub column: u32,
+}
+
+impl From<ppp::DocumentLocation> for DocumentLocation {
+    fn from(location: ppp::DocumentLocation) -> Self {
+        Self {
+            uri: location.uri,
+            line: location.line,
+            column: location.column,
+        }
+    }
 }

@@ -3,9 +3,16 @@ pub mod send;
 
 use futures_util::stream::SplitSink;
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
 
+use crate::csp;
+
 pub type WsWriter<S> = SplitSink<WebSocketStream<S>, Message>;
+
+pub trait AsyncStream: AsyncWrite + AsyncRead + Unpin {}
+
+impl<S: AsyncWrite + AsyncRead + Unpin> AsyncStream for S {}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Request<T> {
@@ -71,9 +78,19 @@ pub struct CursorMovedNotification {
     pub location: DocumentLocation,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DocumentLocation {
     pub uri: String,
-    pub line: i32,
-    pub column: i32,
+    pub line: u32,
+    pub column: u32,
+}
+
+impl From<csp::DocumentLocation> for DocumentLocation {
+    fn from(location: csp::DocumentLocation) -> Self {
+        Self {
+            uri: location.uri,
+            line: location.line,
+            column: location.column,
+        }
+    }
 }

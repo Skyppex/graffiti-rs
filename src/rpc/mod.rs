@@ -73,7 +73,6 @@ pub async fn decode_message(message: String) -> DynResult<NetMessageInfo> {
     })
 }
 
-#[allow(dead_code)]
 pub fn decode_params<'a, T: Deserialize<'a>>(content: &'a [u8]) -> DynResult<T> {
     from_slice::<Params<T>>(content)
         .map(|params| params.params)

@@ -1,14 +1,17 @@
+use std::sync::Arc;
+
 use futures_util::SinkExt;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::{Message, Utf8Bytes};
 
-use crate::{rpc, DynResult};
+use crate::{rpc, DynResult, Log, Logger};
 
-use super::{ClientInfo, InitializeRequest, Request, WsWriter};
+use super::{
+    AsyncStream, ClientInfo, CursorMovedNotification, DocumentLocation, InitializeRequest,
+    Notification, Request, WsWriter,
+};
 
-pub async fn initialize<S: AsyncWrite + AsyncRead + Unpin>(
-    write: &mut WsWriter<S>,
-) -> DynResult<()> {
+pub async fn initialize<S: AsyncStream>(writer: &mut WsWriter<S>) -> DynResult<()> {
     let request = rpc::encode(Request::<InitializeRequest> {
         id: Some("1".to_string()),
         method: "initialize".to_string(),
@@ -22,7 +25,30 @@ pub async fn initialize<S: AsyncWrite + AsyncRead + Unpin>(
         }),
     })?;
 
-    write
+    writer
+        .send(Message::Text(Utf8Bytes::try_from(request)?))
+        .await?;
+
+    Ok(())
+}
+
+pub async fn cursor_moved<S: AsyncStream>(
+    writer: &mut WsWriter<S>,
+    client_id: String,
+    location: DocumentLocation,
+    mut logger: Arc<Mutex<Logger>>,
+) -> DynResult<()> {
+    logger.log("sending cursor moved").await?;
+
+    let request = rpc::encode(Notification::<CursorMovedNotification> {
+        method: "cursor_moved".to_string(),
+        params: Some(CursorMovedNotification {
+            client_id,
+            location,
+        }),
+    })?;
+
+    writer
         .send(Message::Text(Utf8Bytes::try_from(request)?))
         .await?;
 

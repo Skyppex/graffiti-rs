@@ -1,18 +1,20 @@
 use std::sync::Arc;
 
 use futures_util::SinkExt;
-use tokio::{io::{AsyncRead, AsyncWrite}, sync::Mutex};
+use tokio::sync::{mpsc::Sender, Mutex};
 use tokio_tungstenite::tungstenite::{Message, Utf8Bytes};
 
-use crate::{rpc, DynResult, Log, Logger};
+use crate::{net, rpc, DynResult, Log, Logger};
 
 use super::{
-    HostInfo, InitializeResponse, InitializedNotification, Notification, Response, WsWriter,
+    AsyncStream, CursorMovedNotification, HostInfo, InitializeResponse, InitializedNotification,
+    Notification, Response, WsWriter,
 };
 
-pub async fn handle_message<S: AsyncWrite + AsyncRead + Unpin>(
+pub async fn handle_message<S: AsyncStream>(
     msg: Message,
-    write: &mut WsWriter<S>,
+    writer: &mut WsWriter<S>,
+    sender: &Sender<net::send::Message>,
     mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
     if let Message::Text(text) = msg {
@@ -26,9 +28,13 @@ pub async fn handle_message<S: AsyncWrite + AsyncRead + Unpin>(
         logger.log(&format!("Method: {:?}", method)).await?;
 
         match (id, method) {
-            (Some(id), Some(method)) => handle_request(id, &method, decoded.content, write).await?,
-            (Some(id), None) => handle_response(id, decoded.content, write).await?,
-            (None, Some(method)) => handle_notification(&method, decoded.content).await?,
+            (Some(id), Some(method)) => {
+                handle_request(id, &method, decoded.content, writer).await?
+            }
+            (Some(id), None) => handle_response(id, decoded.content, sender, writer).await?,
+            (None, Some(method)) => {
+                handle_notification(&method, decoded.content, sender, writer).await?
+            }
             _ => Err("Id and/or method is required for a message")?,
         }
     }
@@ -36,11 +42,11 @@ pub async fn handle_message<S: AsyncWrite + AsyncRead + Unpin>(
     Ok(())
 }
 
-async fn handle_request<S: AsyncWrite + AsyncRead + Unpin>(
+async fn handle_request<S: AsyncStream>(
     id: String,
     method: &str,
     _content: Vec<u8>,
-    write: &mut WsWriter<S>,
+    writer: &mut WsWriter<S>,
 ) -> DynResult<()> {
     if method == "initialize" {
         let response = rpc::encode(Response::<InitializeResponse> {
@@ -54,7 +60,7 @@ async fn handle_request<S: AsyncWrite + AsyncRead + Unpin>(
             }),
         })?;
 
-        write
+        writer
             .send(Message::Text(Utf8Bytes::try_from(response)?))
             .await?;
     }
@@ -62,23 +68,40 @@ async fn handle_request<S: AsyncWrite + AsyncRead + Unpin>(
     Ok(())
 }
 
-async fn handle_response<S: AsyncWrite + AsyncRead + Unpin>(
+async fn handle_response<S: AsyncStream>(
     _id: String,
     _content: Vec<u8>,
-    write: &mut WsWriter<S>,
+    sender: &Sender<net::send::Message>,
+    writer: &mut WsWriter<S>,
 ) -> DynResult<()> {
     let initialized = rpc::encode(Notification::<InitializedNotification> {
         method: "initialized".to_string(),
         params: Some(InitializedNotification {}),
     })?;
 
-    write
+    writer
         .send(Message::Text(Utf8Bytes::try_from(initialized)?))
         .await?;
 
     Ok(())
 }
 
-async fn handle_notification(_method: &str, _content: Vec<u8>) -> DynResult<()> {
+async fn handle_notification<S: AsyncStream>(
+    method: &str,
+    content: Vec<u8>,
+    sender: &Sender<net::send::Message>,
+    writer: &mut WsWriter<S>,
+) -> DynResult<()> {
+    if method == "cursor_moved" {
+        let params = rpc::decode_params::<CursorMovedNotification>(&content)?;
+
+        sender
+            .send(net::send::Message::CursorMoved {
+                client_id: params.client_id,
+                location: params.location,
+            })
+            .await?;
+    }
+
     Ok(())
 }
