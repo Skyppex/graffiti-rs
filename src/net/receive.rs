@@ -4,6 +4,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     ppp::{self, AsyncStream, DocumentLocation},
+    utility_types::{ClientId, RequestId},
     DynResult, Logger,
 };
 
@@ -11,9 +12,9 @@ use super::WsWriter;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
-    Shutdown(String),
+    Shutdown(RequestId),
     CursorMoved {
-        client_id: String,
+        client_id: ClientId,
         location: DocumentLocation,
     },
 }

@@ -4,7 +4,7 @@ use futures_util::SinkExt;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::{Message, Utf8Bytes};
 
-use crate::{rpc, DynResult, Log, Logger};
+use crate::{rpc, utility_types::ClientId, DynResult, Log, Logger};
 
 use super::{
     AsyncStream, ClientInfo, CursorMovedNotification, DocumentLocation, InitializeRequest,
@@ -13,8 +13,8 @@ use super::{
 
 pub async fn initialize<S: AsyncStream>(writer: &mut WsWriter<S>) -> DynResult<()> {
     let request = rpc::encode(Request::<InitializeRequest> {
-        id: Some("1".to_string()),
-        method: "initialize".to_string(),
+        id: Some("1".into()),
+        method: "initialize".into(),
         params: Some(InitializeRequest {
             process_id: None,
             client_info: Some(ClientInfo {
@@ -34,14 +34,14 @@ pub async fn initialize<S: AsyncStream>(writer: &mut WsWriter<S>) -> DynResult<(
 
 pub async fn cursor_moved<S: AsyncStream>(
     writer: &mut WsWriter<S>,
-    client_id: String,
+    client_id: ClientId,
     location: DocumentLocation,
     mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
     logger.log("sending cursor moved").await?;
 
     let request = rpc::encode(Notification::<CursorMovedNotification> {
-        method: "cursor_moved".to_string(),
+        method: "cursor_moved".into(),
         params: Some(CursorMovedNotification {
             client_id,
             location,

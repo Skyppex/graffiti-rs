@@ -26,7 +26,7 @@ use tokio_tungstenite::{
     Connector, WebSocketStream,
 };
 
-use crate::{ppp, DynResult, Log, Logger};
+use crate::{ppp, state::State, DynResult, Log, Logger};
 
 pub type WsWriter<S> = SplitSink<WebSocketStream<S>, Message>;
 
@@ -55,6 +55,7 @@ fn generate_cert() -> CertData {
 }
 
 pub async fn run_host(
+    state: Arc<Mutex<State>>,
     sender: Sender<send::Message>,
     mut receiver: Receiver<receive::Message>,
     mut logger: Arc<Mutex<Logger>>,
@@ -113,7 +114,7 @@ pub async fn run_host(
                     break;
                 }
 
-                ppp::receive::handle_message(msg, &mut writer, &sender, logger.clone()).await?;
+                ppp::receive::handle_message(msg, state.clone(), &mut writer, &sender, logger.clone()).await?;
             }
             // Handle channel messages
             Some(msg) = receiver.recv() => {
@@ -141,6 +142,7 @@ pub async fn run_host(
 
 pub async fn run_client(
     fingerprint: String,
+    state: Arc<Mutex<State>>,
     sender: Sender<send::Message>,
     mut receiver: Receiver<receive::Message>,
     mut logger: Arc<Mutex<Logger>>,
@@ -164,7 +166,6 @@ pub async fn run_client(
 
     let (mut writer, mut reader) = ws_stream.split();
 
-    // Send a test message
     ppp::send::initialize(&mut writer).await?;
 
     let mut shutdown_id = None;
@@ -186,7 +187,7 @@ pub async fn run_client(
                     break;
                 }
 
-                ppp::receive::handle_message(msg, &mut writer, &sender, logger.clone()).await?;
+                ppp::receive::handle_message(msg, state.clone(), &mut writer, &sender, logger.clone()).await?;
             }
             // Handle channel messages
             Some(msg) = receiver.recv() => {

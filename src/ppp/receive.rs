@@ -4,7 +4,7 @@ use futures_util::SinkExt;
 use tokio::sync::{mpsc::Sender, Mutex};
 use tokio_tungstenite::tungstenite::{Message, Utf8Bytes};
 
-use crate::{net, rpc, DynResult, Log, Logger};
+use crate::{net::send, rpc, state::State, utility_types::RequestId, DynResult, Log, Logger};
 
 use super::{
     AsyncStream, CursorMovedNotification, HostInfo, InitializeResponse, InitializedNotification,
@@ -13,8 +13,9 @@ use super::{
 
 pub async fn handle_message<S: AsyncStream>(
     msg: Message,
+    state: Arc<Mutex<State>>,
     writer: &mut WsWriter<S>,
-    sender: &Sender<net::send::Message>,
+    sender: &Sender<send::Message>,
     mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
     if let Message::Text(text) = msg {
@@ -29,11 +30,13 @@ pub async fn handle_message<S: AsyncStream>(
 
         match (id, method) {
             (Some(id), Some(method)) => {
-                handle_request(id, &method, decoded.content, writer).await?
+                handle_request(id, &method, decoded.content, state, writer, logger).await?
             }
-            (Some(id), None) => handle_response(id, decoded.content, sender, writer).await?,
+            (Some(id), None) => {
+                handle_response(id, decoded.content, state, sender, writer, logger).await?
+            }
             (None, Some(method)) => {
-                handle_notification(&method, decoded.content, sender, writer).await?
+                handle_notification(&method, decoded.content, state, sender, writer, logger).await?
             }
             _ => Err("Id and/or method is required for a message")?,
         }
@@ -43,10 +46,12 @@ pub async fn handle_message<S: AsyncStream>(
 }
 
 async fn handle_request<S: AsyncStream>(
-    id: String,
+    id: RequestId,
     method: &str,
     _content: Vec<u8>,
+    state: Arc<Mutex<State>>,
     writer: &mut WsWriter<S>,
+    mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
     if method == "initialize" {
         let response = rpc::encode(Response::<InitializeResponse> {
@@ -56,7 +61,7 @@ async fn handle_request<S: AsyncStream>(
                     name: "graffiti-rs".to_string(),
                     version: Some("0.1.0".to_string()),
                 }),
-                client_id: "1".to_string(),
+                client_id: "1".into(),
             }),
         })?;
 
@@ -69,19 +74,30 @@ async fn handle_request<S: AsyncStream>(
 }
 
 async fn handle_response<S: AsyncStream>(
-    _id: String,
+    id: RequestId,
     _content: Vec<u8>,
-    sender: &Sender<net::send::Message>,
+    state: Arc<Mutex<State>>,
+    sender: &Sender<send::Message>,
     writer: &mut WsWriter<S>,
+    mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
-    let initialized = rpc::encode(Notification::<InitializedNotification> {
-        method: "initialized".to_string(),
-        params: Some(InitializedNotification {}),
-    })?;
+    if let Some(request) = state.lock().await.get_net_req(&id) {
+        match request.method().as_str() {
+            "initialize" => {
+                let initialized = rpc::encode(Notification::<InitializedNotification> {
+                    method: "initialized".into(),
+                    params: Some(InitializedNotification {
+                        client_id: "1".into(),
+                    }),
+                })?;
 
-    writer
-        .send(Message::Text(Utf8Bytes::try_from(initialized)?))
-        .await?;
+                writer
+                    .send(Message::Text(Utf8Bytes::try_from(initialized)?))
+                    .await?;
+            }
+            other => Err(format!("unknown method: {}", other))?,
+        }
+    }
 
     Ok(())
 }
@@ -89,18 +105,30 @@ async fn handle_response<S: AsyncStream>(
 async fn handle_notification<S: AsyncStream>(
     method: &str,
     content: Vec<u8>,
-    sender: &Sender<net::send::Message>,
+    state: Arc<Mutex<State>>,
+    sender: &Sender<send::Message>,
     writer: &mut WsWriter<S>,
+    mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
-    if method == "cursor_moved" {
-        let params = rpc::decode_params::<CursorMovedNotification>(&content)?;
+    match method {
+        "initialized" => {
+            let params = rpc::decode_params::<InitializedNotification>(&content)?;
 
-        sender
-            .send(net::send::Message::CursorMoved {
-                client_id: params.client_id,
-                location: params.location,
-            })
-            .await?;
+            sender
+                .send(send::Message::ClientInitialized(params.client_id))
+                .await?;
+        }
+        "cursor_moved" => {
+            let params = rpc::decode_params::<CursorMovedNotification>(&content)?;
+
+            sender
+                .send(send::Message::CursorMoved {
+                    client_id: params.client_id.into(),
+                    location: params.location,
+                })
+                .await?;
+        }
+        other => Err(format!("unknown method: {}", other))?,
     }
 
     Ok(())

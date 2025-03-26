@@ -1,14 +1,18 @@
 use std::fmt::Display;
 
-use crate::ppp::DocumentLocation;
+use crate::{
+    ppp::DocumentLocation,
+    utility_types::{ClientId, RequestId},
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
-    Shutdown(Option<String>),
+    Shutdown(Option<RequestId>),
     Ping(String),
     Fingerprint(String),
+    ClientInitialized(ClientId),
     CursorMoved {
-        client_id: String,
+        client_id: ClientId,
         location: DocumentLocation,
     },
 }
@@ -19,6 +23,9 @@ impl Display for Message {
             Message::Shutdown(id) => write!(f, "shutdown: {:?}", id),
             Message::Ping(value) => write!(f, "ping: {}", value),
             Message::Fingerprint(value) => write!(f, "fingerprint: {}", value),
+            Message::ClientInitialized(client_id) => {
+                write!(f, "client initialized: {}", client_id)
+            }
             Message::CursorMoved {
                 client_id,
                 location,

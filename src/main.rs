@@ -5,13 +5,14 @@ mod path_utils;
 mod ppp;
 mod rpc;
 mod state;
+mod utility_types;
 
 use std::{error::Error, process, sync::Arc};
 
 use chrono::Local;
 use csp::{
-    FingerprintGeneratedNotification, InitializeResponse, Notification, Request, Response,
-    ShutdownRequest, ShutdownResponse,
+    FingerprintGeneratedNotification, InitializeOptions, InitializeResponse, Notification, Request,
+    Response, ShutdownRequest, ShutdownResponse,
 };
 
 use clap::Parser;
@@ -25,6 +26,7 @@ use tokio::{
         Mutex,
     },
 };
+use utility_types::*;
 
 type DynError = Box<dyn Error + Send + Sync>;
 type DynResult<T> = Result<T, DynError>;
@@ -36,18 +38,34 @@ async fn main() -> DynResult<()> {
     let mut logger = Arc::new(Mutex::new(get_logger(&cli).await?));
     logger.log("Starting graffiti-rs").await?;
 
+    let is_host = matches!(cli.command, Commands::Host);
+
     let (send_to_main, mut receive_from_thread) = mpsc::channel::<net::send::Message>(8);
     let (send_to_thread, receive_from_main) = mpsc::channel::<net::receive::Message>(8);
+
+    let cwd = std::env::current_dir()?;
+
+    logger
+        .log(format!("Current working directory: {:?}", cwd).as_str())
+        .await?;
+
+    let state = State::new(cwd, is_host, "0".into());
 
     let network_handle = match cli.command {
         Commands::Host => {
             logger.log("Starting host mode").await?;
-            tokio::spawn(run_host(send_to_main, receive_from_main, logger.clone()))
+            tokio::spawn(run_host(
+                state.clone(),
+                send_to_main,
+                receive_from_main,
+                logger.clone(),
+            ))
         }
         Commands::Connect { sha } => {
             logger.log("Starting client mode").await?;
             tokio::spawn(run_client(
                 sha,
+                state.clone(),
                 send_to_main,
                 receive_from_main,
                 logger.clone(),
@@ -61,14 +79,6 @@ async fn main() -> DynResult<()> {
     let mut writer = io::stdout();
 
     logger.log("Entering main message loop").await?;
-
-    let cwd = std::env::current_dir()?;
-
-    logger
-        .log(format!("Current working directory: {:?}", cwd).as_str())
-        .await?;
-
-    let state = State::new(cwd, "0".to_string());
 
     let mut shutting_down = false;
 
@@ -97,7 +107,7 @@ async fn main() -> DynResult<()> {
                     net::send::Message::Shutdown(None) => {
                         let request = rpc::encode(Request::<ShutdownRequest> {
                             id: None,
-                            method: "shutdown".to_string(),
+                            method: "shutdown".into(),
                             params: None,
                         })?;
 
@@ -112,7 +122,7 @@ async fn main() -> DynResult<()> {
                         state.lock().await.set_fingerprint(fingerprint.clone());
 
                         let notification = rpc::encode(Notification::<FingerprintGeneratedNotification> {
-                            method: "fingerprint_generated".to_string(),
+                            method: "fingerprint_generated".into(),
                             params: Some(FingerprintGeneratedNotification {
                                 fingerprint,
                             }),
@@ -120,9 +130,19 @@ async fn main() -> DynResult<()> {
 
                         writer.write_all(&notification).await?;
                     }
+                    net::send::Message::ClientInitialized(client_id) => {
+                        if state.lock().await.is_client() {
+                            logger.log(&format!("client initialized received on client: {}", client_id)).await?;
+                            continue;
+                        }
+
+                        // walk the file tree under the cwd
+                        // send each file as a byte array with
+                        // its relative path to the client_id only
+                    }
                     net::send::Message::CursorMoved { client_id, location } => {
                         let notification = rpc::encode(Notification::<csp::CursorMovedNotification> {
-                            method: "cursor_moved".to_string(),
+                            method: "cursor_moved".into(),
                             params: Some(csp::CursorMovedNotification {
                                 client_id,
                                 location: location.into(),
@@ -200,17 +220,28 @@ async fn handle_input(
 }
 
 async fn handle_message(
-    id: Option<String>,
-    method: &str,
+    id: Option<RequestId>,
+    method: &Method,
     content: &[u8],
     writer: &mut (impl AsyncWrite + Unpin),
     sender: &Sender<net::receive::Message>,
     state: Arc<Mutex<State>>,
     mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<HandledMessage> {
-    match method {
+    match method.as_str() {
         "initialize" => {
-            // let params = rpc::decode_params::<csp::InitializeRequest>(content)?;
+            let params = rpc::decode_params::<csp::InitializeRequest>(content)?;
+
+            if let Some(InitializeOptions {
+                client_projects_root: Some(client_projects_root),
+            }) = &params.initialize_options
+            {
+                let mut state = state.lock().await;
+
+                if state.is_client() {
+                    state.set_cwd(client_projects_root);
+                }
+            }
 
             logger
                 .log("Received initialize message from editor")
@@ -408,7 +439,7 @@ mod tests {
             &content,
             &mut writer,
             &sender,
-            State::new(PathBuf::new(), "0".to_string()),
+            State::new(PathBuf::new(), true, "0".into()),
             logger,
         )
         .await
@@ -421,8 +452,8 @@ mod tests {
     async fn handle_initialize() {
         // arrange
         let initialize = Request::<InitializeRequest> {
-            id: Some("1".to_string()),
-            method: "initialize".to_string(),
+            id: Some("1".into()),
+            method: "initialize".into(),
             params: Some(InitializeRequest {
                 process_id: Some(123),
                 client_info: Some(crate::csp::ClientInfo {
@@ -430,6 +461,7 @@ mod tests {
                     version: Some("0.1.0".to_string()),
                 }),
                 root_path: Some(".".to_string()),
+                initialize_options: None,
             }),
         };
 
@@ -440,7 +472,7 @@ mod tests {
         assert_message_eq(
             response,
             Response::<InitializeResponse> {
-                id: "1".to_string(),
+                id: "1".into(),
                 result: Some(InitializeResponse {
                     server_info: Some(crate::csp::ServerInfo {
                         name: "graffiti-rs".to_string(),
