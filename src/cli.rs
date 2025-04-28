@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{ArgGroup, Parser, Subcommand};
 
 #[derive(Debug, Clone, Parser)]
@@ -5,11 +7,14 @@ use clap::{ArgGroup, Parser, Subcommand};
 pub struct Cli {
     /// The path to the log file
     #[arg(long)]
-    pub log_file: Option<String>,
+    pub log_file: Option<PathBuf>,
 
     /// Log to stderr
     #[arg(short, long)]
     pub log_to_stderr: bool,
+
+    #[arg(long)]
+    pub graffitiignore: Option<PathBuf>,
 
     #[command(subcommand)]
     pub command: Commands,

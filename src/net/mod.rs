@@ -125,7 +125,7 @@ pub async fn run_host(
                     writer.send(Message::Close(None)).await?;
                     shutdown_id = Some(id);
                 } else {
-                    receive::handle_message(msg, &mut writer, logger.clone()).await?;
+                    receive::handle_message(msg, state.clone(), &mut writer, logger.clone()).await?;
                 }
             }
         }
@@ -166,7 +166,7 @@ pub async fn run_client(
 
     let (mut writer, mut reader) = ws_stream.split();
 
-    ppp::send::initialize(&mut writer).await?;
+    ppp::send::initialize(state.clone(), &mut writer, logger.clone()).await?;
 
     let mut shutdown_id = None;
 
@@ -198,7 +198,7 @@ pub async fn run_client(
                     writer.send(Message::Close(None)).await?;
                     shutdown_id = Some(id);
                 } else {
-                    receive::handle_message(msg, &mut writer, logger.clone()).await?;
+                    receive::handle_message(msg, state.clone(), &mut writer, logger.clone()).await?;
                 }
             }
         }
@@ -233,13 +233,11 @@ impl ServerCertVerifier for FingerprintVerifier {
         _ocsp_response: &[u8],
         _now: rustls::pki_types::UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        eprintln!("Verifying certificate");
         let mut hasher = Sha256::new();
         hasher.update(end_entity.as_ref());
         let fingerprint = hasher.finalize();
 
         if fingerprint.as_slice() == self.fingerprint.as_slice() {
-            eprintln!("Verified certificate");
             Ok(ServerCertVerified::assertion())
         } else {
             eprintln!("Fingerprint mismatch");

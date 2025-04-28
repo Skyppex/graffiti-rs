@@ -5,14 +5,14 @@ mod path_utils;
 mod ppp;
 mod rpc;
 mod state;
-mod utility_types;
+mod utils;
 
 use std::{error::Error, process, sync::Arc};
 
 use chrono::Local;
 use csp::{
-    FingerprintGeneratedNotification, InitializeOptions, InitializeResponse, Notification, Request,
-    Response, ShutdownRequest, ShutdownResponse,
+    FingerprintGeneratedNotification, InitializeOptions, InitializeResponse, LocationRequest,
+    Notification, Request, Response, ShutdownRequest, ShutdownResponse,
 };
 
 use clap::Parser;
@@ -26,7 +26,7 @@ use tokio::{
         Mutex,
     },
 };
-use utility_types::*;
+use utils::generate_id;
 
 type DynError = Box<dyn Error + Send + Sync>;
 type DynResult<T> = Result<T, DynError>;
@@ -49,7 +49,7 @@ async fn main() -> DynResult<()> {
         .log(format!("Current working directory: {:?}", cwd).as_str())
         .await?;
 
-    let state = State::new(cwd, is_host, "0".into());
+    let state = State::new(cwd, cli.graffitiignore, is_host, "0".into());
 
     let network_handle = match cli.command {
         Commands::Host => {
@@ -116,6 +116,7 @@ async fn main() -> DynResult<()> {
                         logger.log("Sent shutdown request to editor").await?;
                         shutting_down = true;
                         // just for testing because client isn't running as an editor
+                        // TODO: remove this break and handle it properly
                         break;
                     }
                     net::send::Message::Fingerprint(fingerprint) => {
@@ -130,15 +131,27 @@ async fn main() -> DynResult<()> {
 
                         writer.write_all(&notification).await?;
                     }
+                    net::send::Message::InitialFileUri { uri } => {
+                        logger.log(&format!("200 Received initial file URI: {:?} CWD: {:?}", uri, state.lock().await.get_cwd())).await?;
+
+                        let request = rpc::encode(Request::<csp::InitialFileUriRequest> {
+                            id: Some(generate_id()),
+                            method: "initial_file_uri".into(),
+                            params: Some(csp::InitialFileUriRequest {
+                                cwd: state.lock().await.get_cwd(),
+                                initial_file_uri: uri,
+                            }),
+                        })?;
+
+                        writer.write_all(&request).await?;
+                    }
                     net::send::Message::ClientInitialized(client_id) => {
-                        if state.lock().await.is_client() {
+                        let state = state.lock().await;
+
+                        if state.is_client() {
                             logger.log(&format!("client initialized received on client: {}", client_id)).await?;
                             continue;
                         }
-
-                        // walk the file tree under the cwd
-                        // send each file as a byte array with
-                        // its relative path to the client_id only
                     }
                     net::send::Message::CursorMoved { client_id, location } => {
                         let notification = rpc::encode(Notification::<csp::CursorMovedNotification> {
@@ -146,6 +159,20 @@ async fn main() -> DynResult<()> {
                             params: Some(csp::CursorMovedNotification {
                                 client_id,
                                 location: location.into(),
+                            }),
+                        })?;
+
+                        writer.write_all(&notification).await?;
+                    }
+                    net::send::Message::DocumentEditedFull { client_id, uri, content } => {
+                        let uri = state.lock().await.get_cwd().join(uri);
+                        let notification = rpc::encode(Notification::<csp::DocumentEditedFull> {
+                            method: "document/edited".into(),
+                            params: Some(csp::DocumentEditedFull {
+                                client_id,
+                                mode: csp::DocumentEditMode::Full,
+                                uri,
+                                content,
                             }),
                         })?;
 
@@ -178,7 +205,14 @@ async fn main() -> DynResult<()> {
         logger.log("Finished select iteration").await?;
     }
 
-    network_handle.await??;
+    match network_handle.await? {
+        Ok(_) => {}
+        Err(e) => {
+            logger
+                .log(&format!("Network thread exited with error: {}", e))
+                .await?;
+        }
+    }
 
     if !shutting_down {
         logger.log("Exiting without shutdown message").await?;
@@ -220,24 +254,24 @@ async fn handle_input(
 }
 
 async fn handle_message(
-    id: Option<RequestId>,
-    method: &Method,
+    id: Option<String>,
+    method: &str,
     content: &[u8],
     writer: &mut (impl AsyncWrite + Unpin),
     sender: &Sender<net::receive::Message>,
     state: Arc<Mutex<State>>,
     mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<HandledMessage> {
-    match method.as_str() {
+    match method {
         "initialize" => {
             let params = rpc::decode_params::<csp::InitializeRequest>(content)?;
+
+            let mut state = state.lock().await;
 
             if let Some(InitializeOptions {
                 client_projects_root: Some(client_projects_root),
             }) = &params.initialize_options
             {
-                let mut state = state.lock().await;
-
                 if state.is_client() {
                     state.set_cwd(client_projects_root);
                 }
@@ -254,6 +288,7 @@ async fn handle_message(
                         name: "graffiti-rs".to_string(),
                         version: Some("0.1.0".to_string()),
                     }),
+                    client_id: state.client_id.clone(),
                 }),
             })?;
 
@@ -263,37 +298,101 @@ async fn handle_message(
         }
         "move_cursor" => {
             logger
-                .log("Received move_cursor message from editor 11")
+                .log("Received move_cursor message from editor")
                 .await?;
 
-            let params = rpc::decode_params::<csp::MoveCursorNotification>(content);
+            let params = rpc::decode_params::<csp::MoveCursorNotification>(content)?;
 
-            if let Err(e) = params {
-                logger
-                    .log(&format!("Error decoding params: {:?}", e))
-                    .await?;
-
-                return Err(e);
-            }
-
-            let params = params.unwrap();
-
-            logger
-                .log("Received move_cursor message from editor 22")
-                .await?;
+            state.lock().await.set_my_location(params.location.clone());
 
             sender
                 .send(net::receive::Message::CursorMoved {
-                    client_id: state.lock().await.client_id.clone(),
                     location: params.location.into(),
                 })
                 .await?;
 
             Ok(HandledMessage { should_exit: false })
         }
+        "document/edit" => {
+            logger
+                .log("Received document/edit message from editor")
+                .await?;
+
+            let request = rpc::decode_params::<csp::DocumentEditModeNotification>(content)?;
+            logger.log(&format!("150 {:?}", &request.mode)).await?;
+
+            match request.mode {
+                csp::DocumentEditMode::Full => {
+                    let params = rpc::decode_params::<csp::DocumentEditFull>(content);
+
+                    logger
+                        .log(&format!("151 Received full document edit {:?}", params))
+                        .await?;
+
+                    let params = params?;
+
+                    let mut state = state.lock().await;
+
+                    if let Ok(true) = tokio::fs::try_exists(state.get_cwd().join(&params.uri)).await
+                    {
+                        logger.log("152 File exists").await?;
+
+                        if let Some(true) = state.file_equals(&params.uri, &params.content) {
+                            logger.log("152.1 File content is equal").await?;
+                            return Ok(HandledMessage { should_exit: false });
+                        } else {
+                            state.set_file(params.uri.clone(), &params.content);
+                        }
+
+                        sender
+                            .send(net::receive::Message::DocumentEditFull {
+                                uri: params.uri,
+                                content: params.content,
+                            })
+                            .await?;
+                    } else {
+                        logger.log("153 File doesn't exist").await?;
+                    }
+                }
+                csp::DocumentEditMode::Incremental => {
+                    todo!("154 incremental edits not implemented yet")
+                }
+            }
+
+            logger.log("155 document/edit handled").await?;
+
+            Ok(HandledMessage { should_exit: false })
+        }
         "initialized" => {
             logger
                 .log("Received initialized message from editor")
+                .await?;
+
+            let request = rpc::encode(Request::<LocationRequest> {
+                id: Some(generate_id()),
+                method: "document/location".into(),
+                params: None,
+            })?;
+
+            writer.write_all(&request).await?;
+
+            Ok(HandledMessage { should_exit: false })
+        }
+        "document/location" => {
+            logger
+                .log("Received document/location message from editor")
+                .await?;
+
+            let params = rpc::decode_params::<csp::LocationResponse>(content)?;
+            logger.log(&format!("50 {:?}", params)).await?;
+
+            state.lock().await.set_my_location(params.location);
+
+            Ok(HandledMessage { should_exit: false })
+        }
+        "cwd_changed" => {
+            logger
+                .log("Received cwd_changed message from editor")
                 .await?;
 
             Ok(HandledMessage { should_exit: false })
@@ -439,7 +538,7 @@ mod tests {
             &content,
             &mut writer,
             &sender,
-            State::new(PathBuf::new(), true, "0".into()),
+            State::new(PathBuf::new(), None, true, "0".into()),
             logger,
         )
         .await
@@ -456,7 +555,7 @@ mod tests {
             method: "initialize".into(),
             params: Some(InitializeRequest {
                 process_id: Some(123),
-                client_info: Some(crate::csp::ClientInfo {
+                editor_info: Some(crate::csp::EditorInfo {
                     name: "test-client".to_string(),
                     version: Some("0.1.0".to_string()),
                 }),
@@ -474,6 +573,7 @@ mod tests {
             Response::<InitializeResponse> {
                 id: "1".into(),
                 result: Some(InitializeResponse {
+                    client_id: "0".to_string(),
                     server_info: Some(crate::csp::ServerInfo {
                         name: "graffiti-rs".to_string(),
                         version: Some("0.1.0".to_string()),

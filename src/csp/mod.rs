@@ -2,38 +2,38 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ppp, utility_types::*};
+use crate::ppp;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Request<T> {
-    pub id: Option<RequestId>,
-    pub method: Method,
+    pub id: Option<String>,
+    pub method: String,
     pub params: Option<T>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Response<T> {
-    pub id: RequestId,
+    pub id: String,
     pub result: Option<T>,
     // pub error: (),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Notification<T> {
-    pub method: Method,
+    pub method: String,
     pub params: Option<T>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct InitializeRequest {
     pub process_id: Option<i32>,
-    pub client_info: Option<ClientInfo>,
+    pub editor_info: Option<EditorInfo>,
     pub root_path: Option<String>,
     pub initialize_options: Option<InitializeOptions>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ClientInfo {
+pub struct EditorInfo {
     pub name: String,
     pub version: Option<String>,
 }
@@ -46,6 +46,7 @@ pub struct InitializeOptions {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct InitializeResponse {
     pub server_info: Option<ServerInfo>,
+    pub client_id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -80,13 +81,19 @@ pub struct FingerprintResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct InitialFileUriRequest {
+    pub cwd: PathBuf,
+    pub initial_file_uri: PathBuf,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct MoveCursorNotification {
     pub location: DocumentLocation,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CursorMovedNotification {
-    pub client_id: ClientId,
+    pub client_id: String,
     pub location: DocumentLocation,
 }
 
@@ -105,4 +112,55 @@ impl From<ppp::DocumentLocation> for DocumentLocation {
             column: location.column,
         }
     }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LocationRequest;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LocationResponse {
+    pub location: DocumentLocation,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DocumentEditModeNotification {
+    pub mode: DocumentEditMode,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DocumentEditFull {
+    pub uri: PathBuf,
+    pub content: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DocumentEditIncremental {
+    pub start: DocumentLocation,
+    pub end: DocumentLocation,
+    pub content: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DocumentEditedFull {
+    pub client_id: String,
+    pub mode: DocumentEditMode,
+    pub uri: PathBuf,
+    pub content: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DocumentEditedIncremental {
+    pub client_id: String,
+    pub mode: DocumentEditMode,
+    pub start: DocumentLocation,
+    pub end: DocumentLocation,
+    pub content: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum DocumentEditMode {
+    #[serde(rename = "full")]
+    Full,
+    #[serde(rename = "incremental")]
+    Incremental,
 }

@@ -1,19 +1,29 @@
-use std::fmt::Display;
+use std::{fmt::Display, path::PathBuf};
 
-use crate::{
-    ppp::DocumentLocation,
-    utility_types::{ClientId, RequestId},
-};
+use crate::ppp::DocumentLocation;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
-    Shutdown(Option<RequestId>),
+    #[allow(dead_code)]
     Ping(String),
+
+    // local client-server only messages
+    Shutdown(Option<String>),
     Fingerprint(String),
-    ClientInitialized(ClientId),
+
+    // peer generated messages
+    ClientInitialized(String),
+    InitialFileUri {
+        uri: PathBuf,
+    },
     CursorMoved {
-        client_id: ClientId,
+        client_id: String,
         location: DocumentLocation,
+    },
+    DocumentEditedFull {
+        client_id: String,
+        uri: PathBuf,
+        content: String,
     },
 }
 
@@ -26,10 +36,22 @@ impl Display for Message {
             Message::ClientInitialized(client_id) => {
                 write!(f, "client initialized: {}", client_id)
             }
+            Message::InitialFileUri { uri } => {
+                write!(f, "initial file uri: {:?}", uri)
+            }
             Message::CursorMoved {
                 client_id,
                 location,
             } => write!(f, "cursor moved: {} {:?}", client_id, location),
+            Message::DocumentEditedFull {
+                client_id,
+                uri,
+                content,
+            } => write!(
+                f,
+                "document edit full: {} {:?}: {}",
+                client_id, uri, content
+            ),
         }
     }
 }

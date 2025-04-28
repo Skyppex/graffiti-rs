@@ -2,34 +2,39 @@ use serde::{Deserialize, Serialize};
 use serde_json::{from_slice, to_string};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 
-use crate::{utility_types::*, DynResult};
+use crate::DynResult;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct IdProp {
-    pub id: RequestId,
+    pub id: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MethodProp {
-    pub method: Method,
+    pub method: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-struct Params<T> {
+struct ParamsProp<T> {
     params: T,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct ResultProp<T> {
+    result: T,
 }
 
 #[derive(Debug, Clone)]
 pub struct MessageInfo {
-    pub id: Option<RequestId>,
-    pub method: Method,
+    pub id: Option<String>,
+    pub method: String,
     pub content: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
 pub struct NetMessageInfo {
-    pub id: Option<RequestId>,
-    pub method: Option<Method>,
+    pub id: Option<String>,
+    pub method: Option<String>,
     pub content: Vec<u8>,
 }
 
@@ -64,18 +69,24 @@ pub async fn decode_message(message: String) -> DynResult<NetMessageInfo> {
 
     let content = message.as_bytes();
     let id = from_slice::<IdProp>(content).ok();
-    let method = from_slice::<Method>(content).ok();
+    let method = from_slice::<MethodProp>(content).ok();
 
     Ok(NetMessageInfo {
         id: id.map(|id| id.id),
-        method,
+        method: method.map(|m| m.method),
         content: content.to_vec(),
     })
 }
 
 pub fn decode_params<'a, T: Deserialize<'a>>(content: &'a [u8]) -> DynResult<T> {
-    from_slice::<Params<T>>(content)
+    from_slice::<ParamsProp<T>>(content)
         .map(|params| params.params)
+        .map_err(|e| e.into())
+}
+
+pub fn decode_result<'a, T: Deserialize<'a>>(content: &'a [u8]) -> DynResult<T> {
+    from_slice::<ResultProp<T>>(content)
+        .map(|result| result.result)
         .map_err(|e| e.into())
 }
 
@@ -127,7 +138,7 @@ mod tests {
 
         // assert
         decoded.id.should().be_equal_to(Some("0".into()));
-        decoded.method.should().be_equal_to("test".into());
+        decoded.method.should().be_equal_to("test".to_string());
         decoded.content.len().should().be_equal_to(26);
     }
     #[test]
