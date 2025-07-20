@@ -42,6 +42,10 @@ pub async fn handle_message<S: AsyncStream>(
             unreachable!("should be handled before reaching here: {}", id);
         }
         Message::CursorMoved { location } => {
+            if !location.exists() {
+                return Ok(());
+            }
+
             ppp::send::cursor_moved(
                 writer,
                 state.lock().await.client_id.clone(),
@@ -51,6 +55,10 @@ pub async fn handle_message<S: AsyncStream>(
             .await
         }
         Message::DocumentEditFull { uri, content } => {
+            if !uri.exists() {
+                return Ok(());
+            }
+
             ppp::send::document_edit_full(
                 writer,
                 state.lock().await.client_id.clone(),

@@ -105,6 +105,12 @@ pub struct DocumentLocation {
     pub column: u32,
 }
 
+impl DocumentLocation {
+    pub fn exists(&self) -> bool {
+        self.uri.exists()
+    }
+}
+
 impl From<csp::DocumentLocation> for DocumentLocation {
     fn from(location: csp::DocumentLocation) -> Self {
         Self {
@@ -172,4 +178,3 @@ pub enum DirectoryType {
 pub struct InitialFileNotification {
     pub uri: PathBuf,
 }
-

@@ -104,6 +104,12 @@ pub struct DocumentLocation {
     pub column: u32,
 }
 
+impl DocumentLocation {
+    pub fn exists(&self) -> bool {
+        self.uri.is_file()
+    }
+}
+
 impl From<ppp::DocumentLocation> for DocumentLocation {
     fn from(location: ppp::DocumentLocation) -> Self {
         Self {

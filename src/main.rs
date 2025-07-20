@@ -115,9 +115,6 @@ async fn main() -> DynResult<()> {
                         writer.write_all(&request).await?;
                         logger.log("Sent shutdown request to editor").await?;
                         shutting_down = true;
-                        // just for testing because client isn't running as an editor
-                        // TODO: remove this break and handle it properly
-                        break;
                     }
                     net::send::Message::Fingerprint(fingerprint) => {
                         state.lock().await.set_fingerprint(fingerprint.clone());
@@ -303,6 +300,10 @@ async fn handle_message(
 
             let params = rpc::decode_params::<csp::MoveCursorNotification>(content)?;
 
+            if !params.location.exists() {
+                return Ok(HandledMessage { should_exit: false });
+            }
+
             state.lock().await.set_my_location(params.location.clone());
 
             sender
@@ -330,6 +331,10 @@ async fn handle_message(
                         .await?;
 
                     let params = params?;
+
+                    if !params.uri.exists() {
+                        return Ok(HandledMessage { should_exit: false });
+                    }
 
                     let mut state = state.lock().await;
 
