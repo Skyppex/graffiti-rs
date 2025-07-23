@@ -100,6 +100,11 @@ pub struct CursorMovedNotification {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DocumentLocation {
     pub uri: PathBuf,
+    pub pos: DocumentPosition,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DocumentPosition {
     pub line: u32,
     pub column: u32,
 }
@@ -114,8 +119,16 @@ impl From<ppp::DocumentLocation> for DocumentLocation {
     fn from(location: ppp::DocumentLocation) -> Self {
         Self {
             uri: location.uri,
-            line: location.line,
-            column: location.column,
+            pos: location.pos.into(),
+        }
+    }
+}
+
+impl From<ppp::DocumentPosition> for DocumentPosition {
+    fn from(pos: ppp::DocumentPosition) -> Self {
+        Self {
+            line: pos.line,
+            column: pos.column,
         }
     }
 }
@@ -141,8 +154,9 @@ pub struct DocumentEditFull {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DocumentEditIncremental {
-    pub start: DocumentLocation,
-    pub end: DocumentLocation,
+    pub uri: PathBuf,
+    pub start: DocumentPosition,
+    pub end: DocumentPosition,
     pub content: String,
 }
 
@@ -158,8 +172,9 @@ pub struct DocumentEditedFull {
 pub struct DocumentEditedIncremental {
     pub client_id: String,
     pub mode: DocumentEditMode,
-    pub start: DocumentLocation,
-    pub end: DocumentLocation,
+    pub uri: PathBuf,
+    pub start: DocumentPosition,
+    pub end: DocumentPosition,
     pub content: String,
 }
 

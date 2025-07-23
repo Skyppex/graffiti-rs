@@ -101,6 +101,11 @@ pub struct CursorMovedNotification {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DocumentLocation {
     pub uri: PathBuf,
+    pub pos: DocumentPosition,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DocumentPosition {
     pub line: u32,
     pub column: u32,
 }
@@ -115,8 +120,16 @@ impl From<csp::DocumentLocation> for DocumentLocation {
     fn from(location: csp::DocumentLocation) -> Self {
         Self {
             uri: location.uri,
-            line: location.line,
-            column: location.column,
+            pos: location.pos.into(),
+        }
+    }
+}
+
+impl From<csp::DocumentPosition> for DocumentPosition {
+    fn from(pos: csp::DocumentPosition) -> Self {
+        Self {
+            line: pos.line,
+            column: pos.column,
         }
     }
 }
@@ -139,8 +152,9 @@ pub struct DocumentEditFullNotification {
 pub struct DocumentEditIncrementalNotification {
     pub client_id: String,
     pub mode: DocumentEditMode,
-    pub start: DocumentLocation,
-    pub end: DocumentLocation,
+    pub uri: PathBuf,
+    pub start: DocumentPosition,
+    pub end: DocumentPosition,
     pub content: String,
 }
 

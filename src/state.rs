@@ -134,6 +134,11 @@ impl State {
 #[derive(Debug, Clone)]
 pub struct DocumentLocation {
     pub uri: PathBuf,
+    pub pos: DocumentPosition,
+}
+
+#[derive(Debug, Clone)]
+pub struct DocumentPosition {
     pub line: u32,
     pub column: u32,
 }
@@ -142,8 +147,7 @@ impl From<csp::DocumentLocation> for DocumentLocation {
     fn from(location: csp::DocumentLocation) -> Self {
         Self {
             uri: location.uri,
-            line: location.line,
-            column: location.column,
+            pos: location.pos.into(),
         }
     }
 }
@@ -152,6 +156,23 @@ impl From<ppp::DocumentLocation> for DocumentLocation {
     fn from(location: ppp::DocumentLocation) -> Self {
         Self {
             uri: location.uri,
+            pos: location.pos.into(),
+        }
+    }
+}
+
+impl From<csp::DocumentPosition> for DocumentPosition {
+    fn from(location: csp::DocumentPosition) -> Self {
+        Self {
+            line: location.line,
+            column: location.column,
+        }
+    }
+}
+
+impl From<ppp::DocumentPosition> for DocumentPosition {
+    fn from(location: ppp::DocumentPosition) -> Self {
+        Self {
             line: location.line,
             column: location.column,
         }
