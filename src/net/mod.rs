@@ -1,7 +1,7 @@
 pub mod receive;
 pub mod send;
 
-use std::sync::Arc;
+use std::{net::IpAddr, str::FromStr, sync::Arc};
 
 use futures_util::{stream::SplitSink, SinkExt, StreamExt};
 
@@ -35,16 +35,24 @@ struct CertData {
     key: PrivateKeyDer<'static>,
 }
 
-fn compute_fingerprint(cert: &CertificateDer<'static>) -> String {
+fn compute_fingerprint(cert: &CertificateDer<'static>, public_ip: &IpAddr) -> String {
     let mut hasher = Sha256::new();
     hasher.update(cert.as_ref());
     let result = hasher.finalize();
+
+    let octets = match public_ip {
+        IpAddr::V4(v4) => v4.octets().to_vec(),
+        IpAddr::V6(v6) => v6.octets().to_vec(),
+    };
+
+    let result = result.into_iter().chain(octets).collect::<Vec<u8>>();
+
     hex::encode(result)
 }
 
-fn generate_cert() -> CertData {
+fn generate_cert(public_ip: &IpAddr) -> CertData {
     let CertifiedKey { cert, key_pair } =
-        rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        rcgen::generate_simple_self_signed(vec![public_ip.to_string()]).unwrap();
     let cert_der = cert.der();
     let priv_key_der = key_pair.serialize_der();
 
@@ -60,8 +68,10 @@ pub async fn run_host(
     mut receiver: Receiver<receive::Message>,
     mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
-    let cert_data = generate_cert();
-    let fingerprint = compute_fingerprint(&cert_data.certs[0]);
+    let public_ip = reqwest::get("https://api.ipify.org").await?.text().await?;
+    let public_ip = IpAddr::from_str(&public_ip)?;
+    let cert_data = generate_cert(&public_ip);
+    let fingerprint = compute_fingerprint(&cert_data.certs[0], &public_ip);
     logger.log(&format!("Fingerprint: {}", fingerprint)).await?;
 
     sender.send(send::Message::Fingerprint(fingerprint)).await?;
@@ -72,8 +82,9 @@ pub async fn run_host(
 
     let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
 
-    let listener = TcpListener::bind("0.0.0.0:8080").await?;
-    logger.log("Listening on 0.0.0.0:8080").await?;
+    let uri = "0.0.0.0:8080";
+    let listener = TcpListener::bind(uri).await?;
+    logger.log(&format!("Listening on {}", uri)).await?;
 
     let (socket, addr) = listener.accept().await?;
     logger
@@ -147,10 +158,38 @@ pub async fn run_client(
     mut receiver: Receiver<receive::Message>,
     mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
-    let url = "wss://127.0.0.1:8080".parse::<Uri>()?;
+    let public_ip = reqwest::get("https://api.ipify.org").await?.text().await?;
+    let public_ip = IpAddr::from_str(&public_ip)?;
+
+    logger.log(&format!("1")).await?;
+    let (fingerprint, server_ip) = {
+        logger.log(&format!("2")).await?;
+        let decoded = hex::decode(fingerprint)?;
+
+        let (fp, ip) = decoded.split_at(32);
+        logger.log(&format!("4: {:?} | {:?}", fp, ip)).await?;
+
+        (
+            fp.to_vec(),
+            ip_from_octets(ip).ok_or_else(|| "couldn't create ip from octets")?,
+        )
+    };
+
+    logger.log(&format!("server ip: {}", server_ip)).await?;
+
+    let connection_ip = if server_ip == public_ip {
+        "127.0.0.1".to_string()
+    } else {
+        match server_ip {
+            IpAddr::V4(v4) => v4.to_string(),
+            IpAddr::V6(v6) => format!("[{}]", v6),
+        }
+    };
+
+    let url = format!("wss://{}:8080", connection_ip).parse::<Uri>()?;
     logger.log(&format!("Connecting to {}", url)).await?;
 
-    let verifier = FingerprintVerifier::new(hex::decode(fingerprint)?);
+    let verifier = FingerprintVerifier::new(fingerprint);
 
     let tls_config = ClientConfig::builder()
         .dangerous()
@@ -211,6 +250,20 @@ pub async fn run_client(
     logger.log("shutdown sent to main").await?;
 
     Ok(())
+}
+
+fn ip_from_octets(bytes: &[u8]) -> Option<IpAddr> {
+    match bytes.len() {
+        4 => {
+            let arr: [u8; 4] = bytes.try_into().ok()?;
+            Some(IpAddr::from(arr))
+        }
+        16 => {
+            let arr: [u8; 16] = bytes.try_into().ok()?;
+            Some(IpAddr::from(arr))
+        }
+        _ => None,
+    }
 }
 
 #[derive(Debug)]
