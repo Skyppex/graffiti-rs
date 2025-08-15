@@ -7,15 +7,15 @@
     naersk.url = "github:nix-community/naersk";
   };
 
-  outputs = { nixpkgs, flake-utils, naersk, ... }:
+  outputs = { self, nixpkgs, flake-utils, naersk, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         # system = "x86_64-linux";
         pkgs = import nixpkgs { inherit system; };
         naerskLib = pkgs.callPackage naersk { };
       in {
-        # packages.default = arcanaPackage;
         packages.default = pkgs.callPackage ./default.nix {
+          src = self;
           naerskLib = naerskLib;
           pkg-config = pkgs.pkg-config;
         };

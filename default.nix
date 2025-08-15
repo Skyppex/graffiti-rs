@@ -1,7 +1,7 @@
-{ naerskLib, pkg-config }:
+{ src, naerskLib, pkg-config }:
 
 naerskLib.buildPackage {
   name = "graffiti-rs";
-  src = ./.;
+  src = src;
   nativeBuildInputs = [ pkg-config ];
 }
