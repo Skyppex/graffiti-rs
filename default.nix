@@ -1,7 +1,18 @@
-{ src, naerskLib, pkg-config }:
-
-naerskLib.buildPackage {
+{
+  src,
+  naersk,
+  pkgConfig,
+  release ? false,
+}:
+naersk.buildPackage {
   name = "graffiti-rs";
-  src = src;
-  nativeBuildInputs = [ pkg-config ];
+  inherit src;
+  nativeBuildInputs = [pkgConfig];
+  doCheck = false;
+
+  cargoBuildFlags = (
+    if release
+    then ["--release"]
+    else []
+  );
 }
