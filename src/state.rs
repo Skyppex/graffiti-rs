@@ -58,6 +58,7 @@ impl State {
 
     pub fn set_cwd(&mut self, cwd: &Path) {
         self.cwd = cwd.to_path_buf();
+        std::env::set_current_dir(&cwd).expect("current dir couldn't be set");
     }
 
     pub fn _set_remote_projects_path(&mut self, remote_projects_path: PathBuf) {
@@ -65,12 +66,14 @@ impl State {
     }
 
     pub fn set_cwd_from_remote_projects_path(&mut self, project_dir_name: &Path) {
-        self.cwd = self
-            .remote_projects_path
-            .clone()
-            .unwrap_or_else(|| dirs::data_local_dir().expect("failed to get data local dir"))
-            .join("graffiti")
-            .join(project_dir_name)
+        self.set_cwd(
+            &self
+                .remote_projects_path
+                .clone()
+                .unwrap_or_else(|| dirs::data_local_dir().expect("failed to get data local dir"))
+                .join("graffiti")
+                .join(project_dir_name),
+        )
     }
 
     pub fn get_ignore_file(&self) -> Option<PathBuf> {
@@ -93,7 +96,7 @@ impl State {
         self.network_requests.remove(req_id)
     }
 
-    pub fn get_client_location(&self, client_id: &str) -> Option<&DocumentLocation> {
+    pub fn _get_client_location(&self, client_id: &str) -> Option<&DocumentLocation> {
         self.client_locations.get(client_id)
     }
 

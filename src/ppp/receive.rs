@@ -253,35 +253,24 @@ async fn handle_notification<S: AsyncStream>(
 
             let params = rpc::decode_params::<DirectoriesUploadNotification>(&content)?;
 
-            logger.log("100").await?;
-
             let directories = params.directories;
 
             for dir in directories {
-                logger.log(&format!("101 dir: {:?}", dir)).await?;
                 let full_uri = state.lock().await.get_cwd().join(&dir.uri);
-                logger.log(&format!("full_uri: {:?}", full_uri)).await?;
 
                 match dir.type_ {
                     DirectoryType::Directory => {
-                        logger.log("102").await?;
                         if !full_uri.exists() {
-                            logger.log("103").await?;
                             tokio::fs::create_dir_all(&full_uri).await?;
                         }
                     }
                     DirectoryType::File => {
-                        logger.log("104").await?;
                         if !full_uri.exists() {
-                            logger.log("105").await?;
                             tokio::fs::create_dir_all(full_uri.parent().unwrap()).await?;
                         }
 
-                        logger.log("106").await?;
                         let mut file = tokio::fs::File::create(&full_uri).await?;
-                        logger.log("107").await?;
                         file.write_all(&dir.content).await?;
-                        logger.log("108").await?;
                     }
                 }
             }

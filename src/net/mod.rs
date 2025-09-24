@@ -62,13 +62,17 @@ fn generate_cert(public_ip: &IpAddr) -> CertData {
     }
 }
 
+async fn get_ip() -> DynResult<String> {
+    Ok(reqwest::get("https://api.ipify.org").await?.text().await?)
+}
+
 pub async fn run_host(
     state: Arc<Mutex<State>>,
     sender: Sender<send::Message>,
     mut receiver: Receiver<receive::Message>,
     mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
-    let public_ip = reqwest::get("https://api.ipify.org").await?.text().await?;
+    let public_ip = get_ip().await.unwrap_or_else(|_| "127.0.0.1".to_string());
     let public_ip = IpAddr::from_str(&public_ip)?;
     let cert_data = generate_cert(&public_ip);
     let fingerprint = compute_fingerprint(&cert_data.certs[0], &public_ip);
@@ -158,16 +162,13 @@ pub async fn run_client(
     mut receiver: Receiver<receive::Message>,
     mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
-    let public_ip = reqwest::get("https://api.ipify.org").await?.text().await?;
+    let public_ip = get_ip().await.unwrap_or_else(|_| "127.0.0.1".to_string());
     let public_ip = IpAddr::from_str(&public_ip)?;
 
-    logger.log(&format!("1")).await?;
     let (fingerprint, server_ip) = {
-        logger.log(&format!("2")).await?;
         let decoded = hex::decode(fingerprint)?;
 
         let (fp, ip) = decoded.split_at(32);
-        logger.log(&format!("4: {:?} | {:?}", fp, ip)).await?;
 
         (
             fp.to_vec(),

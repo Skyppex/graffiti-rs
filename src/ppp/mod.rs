@@ -112,7 +112,7 @@ pub struct DocumentPosition {
 
 impl DocumentLocation {
     pub fn exists(&self) -> bool {
-        self.uri.exists()
+        self.uri.is_file()
     }
 }
 

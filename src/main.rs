@@ -320,30 +320,18 @@ async fn handle_message(
                 .await?;
 
             let request = rpc::decode_params::<csp::DocumentEditModeNotification>(content)?;
-            logger.log(&format!("150 {:?}", &request.mode)).await?;
 
             match request.mode {
                 csp::DocumentEditMode::Full => {
                     let params = rpc::decode_params::<csp::DocumentEditFull>(content);
 
-                    logger
-                        .log(&format!("151 Received full document edit {:?}", params))
-                        .await?;
-
                     let params = params?;
-
-                    if !params.uri.exists() {
-                        return Ok(HandledMessage { should_exit: false });
-                    }
 
                     let mut state = state.lock().await;
 
                     if let Ok(true) = tokio::fs::try_exists(state.get_cwd().join(&params.uri)).await
                     {
-                        logger.log("152 File exists").await?;
-
                         if let Some(true) = state.file_equals(&params.uri, &params.content) {
-                            logger.log("152.1 File content is equal").await?;
                             return Ok(HandledMessage { should_exit: false });
                         } else {
                             state.set_file(params.uri.clone(), &params.content);
@@ -363,8 +351,6 @@ async fn handle_message(
                     todo!("154 incremental edits not implemented yet")
                 }
             }
-
-            logger.log("155 document/edit handled").await?;
 
             Ok(HandledMessage { should_exit: false })
         }
