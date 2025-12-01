@@ -5,8 +5,8 @@
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     naersk.url = "github:nix-community/naersk";
-    rust-overlay = {
-      url = "github:oxalica/rust-overlay";
+    fenix = {
+      url = "github:nix-community/fenix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
@@ -16,16 +16,28 @@
     nixpkgs,
     flake-utils,
     naersk,
-    rust-overlay,
+    fenix,
     ...
   }:
     flake-utils.lib.eachDefaultSystem (system: let
       pkgs = import nixpkgs {
         inherit system;
-        overlays = [rust-overlay.overlays.default];
       };
 
-      toolchain = pkgs.rust-bin.stable.latest.default;
+      fenixLib = fenix.packages.${system};
+      toolchain = with fenixLib;
+        combine [
+          (stable.withComponents [
+            "rustc"
+            "cargo"
+            "rustfmt"
+            "clippy"
+            "rust-src"
+            "rust-docs"
+            "rust-std"
+            "rust-analyzer"
+          ])
+        ];
 
       naerskLib = (pkgs.callPackage naersk {}).override {
         cargo = toolchain;
