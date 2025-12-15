@@ -67,8 +67,19 @@
       };
 
       devShells.default = pkgs.mkShell {
-        packages = [toolchain];
+        packages = with pkgs; [
+          toolchain
+          alejandra
+          nil
+        ];
         env.RUST_SRC_PATH = "${toolchain}/lib/rustlib/src/rust/library";
+        LD_LIBRARY_PATH = with pkgs; lib.makeLibraryPath [openssl];
+        shellHook = ''
+          DIR="$(pwd)/result/bin"
+          if test -e "$DIR"; then
+              PATH="$DIR:$PATH"
+          fi
+        '';
       };
 
       checks = checks;
