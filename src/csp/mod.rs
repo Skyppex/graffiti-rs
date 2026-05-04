@@ -81,6 +81,11 @@ pub struct FingerprintResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct ClientIdChangedNotification {
+    pub client_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct InitialFileUriRequest {
     pub cwd: PathBuf,
     pub initial_file_uri: PathBuf,

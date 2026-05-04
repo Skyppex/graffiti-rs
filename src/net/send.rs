@@ -13,6 +13,7 @@ pub enum Message {
 
     // peer generated messages
     ClientInitialized(String),
+    Initialized(String),
     InitialFileUri {
         uri: PathBuf,
     },
@@ -35,6 +36,9 @@ impl Display for Message {
             Message::Fingerprint(value) => write!(f, "fingerprint: {}", value),
             Message::ClientInitialized(client_id) => {
                 write!(f, "client initialized: {}", client_id)
+            }
+            Message::Initialized(client_id) => {
+                write!(f, "initialized: {}", client_id)
             }
             Message::InitialFileUri { uri } => {
                 write!(f, "initial file uri: {:?}", uri)

@@ -26,7 +26,7 @@ use tokio_tungstenite::{
     Connector, WebSocketStream,
 };
 
-use crate::{ppp, state::State, DynResult, Log, Logger};
+use crate::{id::next_client_id, ppp, state::State, DynResult, Log, Logger};
 
 pub type WsWriter<S> = SplitSink<WebSocketStream<S>, Message>;
 
@@ -214,7 +214,7 @@ pub async fn run_client(
         tokio::select! {
             // Handle incoming messages
             Some(msg) = reader.next() => {
-                logger.log(&format!("Received from host: {:?}", msg)).await?;
+                logger.log(&format!("Received from host")).await?;
 
                 if msg.is_err() {
                     break;

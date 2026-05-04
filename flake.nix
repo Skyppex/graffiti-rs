@@ -69,6 +69,7 @@
       devShells.default = pkgs.mkShell {
         packages = with pkgs; [
           toolchain
+          pkg-config
           alejandra
           nil
         ];

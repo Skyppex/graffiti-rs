@@ -1,11 +1,11 @@
 mod cli;
 mod csp;
+mod id;
 mod net;
 mod path_utils;
 mod ppp;
 mod rpc;
 mod state;
-mod utils;
 
 use std::{error::Error, process, sync::Arc};
 
@@ -17,6 +17,7 @@ use csp::{
 
 use clap::Parser;
 use cli::{Cli, Commands};
+use id::next_client_id;
 use net::{run_client, run_host};
 use state::State;
 use tokio::{
@@ -26,7 +27,8 @@ use tokio::{
         Mutex,
     },
 };
-use utils::generate_id;
+
+use crate::{id::next_request_id, net::send::Message};
 
 type DynError = Box<dyn Error + Send + Sync>;
 type DynResult<T> = Result<T, DynError>;
@@ -49,7 +51,13 @@ async fn main() -> DynResult<()> {
         .log(format!("Current working directory: {:?}", cwd).as_str())
         .await?;
 
-    let state = State::new(cwd, cli.graffitiignore, is_host, "0".into());
+    let next_client_id = next_client_id();
+    logger.log(&format!("next_client_id = {}", next_client_id));
+    let state = State::new(cwd, cli.graffitiignore, is_host, next_client_id);
+
+    logger
+        .log(&format!("my client id is {}", state.lock().await.client_id))
+        .await?;
 
     let network_handle = match cli.command {
         Commands::Host => {
@@ -89,93 +97,10 @@ async fn main() -> DynResult<()> {
                 logger.log("Waiting for message from network").await?;
                 receive_from_thread.recv()
             } => {
-                logger.log(&format!("Received from network: {}", message)).await?;
-                // Handle the message here
-                // You might want to send responses back using send_thread
-                match message {
-                    net::send::Message::Shutdown(Some(id)) => {
-                        let response = rpc::encode(Response::<ShutdownResponse> {
-                            id,
-                            result: None,
-                        })?;
+                let result = handle_network_message(message, &mut writer, state.clone(), logger.clone()).await?;
 
-                        logger.log("Sending shutdown response to editor").await?;
-                        writer.write_all(&response).await?;
-                        logger.log("Sent shutdown response to editor").await?;
-                        shutting_down = true;
-                    }
-                    net::send::Message::Shutdown(None) => {
-                        let request = rpc::encode(Request::<ShutdownRequest> {
-                            id: None,
-                            method: "shutdown".into(),
-                            params: None,
-                        })?;
-
-                        logger.log("Sending shutdown request to editor").await?;
-                        writer.write_all(&request).await?;
-                        logger.log("Sent shutdown request to editor").await?;
-                        shutting_down = true;
-                    }
-                    net::send::Message::Fingerprint(fingerprint) => {
-                        state.lock().await.set_fingerprint(fingerprint.clone());
-
-                        let notification = rpc::encode(Notification::<FingerprintGeneratedNotification> {
-                            method: "fingerprint_generated".into(),
-                            params: Some(FingerprintGeneratedNotification {
-                                fingerprint,
-                            }),
-                        })?;
-
-                        writer.write_all(&notification).await?;
-                    }
-                    net::send::Message::InitialFileUri { uri } => {
-                        logger.log(&format!("200 Received initial file URI: {:?} CWD: {:?}", uri, state.lock().await.get_cwd())).await?;
-
-                        let request = rpc::encode(Request::<csp::InitialFileUriRequest> {
-                            id: Some(generate_id()),
-                            method: "initial_file_uri".into(),
-                            params: Some(csp::InitialFileUriRequest {
-                                cwd: state.lock().await.get_cwd(),
-                                initial_file_uri: uri,
-                            }),
-                        })?;
-
-                        writer.write_all(&request).await?;
-                    }
-                    net::send::Message::ClientInitialized(client_id) => {
-                        let state = state.lock().await;
-
-                        if state.is_client() {
-                            logger.log(&format!("client initialized received on client: {}", client_id)).await?;
-                            continue;
-                        }
-                    }
-                    net::send::Message::CursorMoved { client_id, location } => {
-                        let notification = rpc::encode(Notification::<csp::CursorMovedNotification> {
-                            method: "cursor_moved".into(),
-                            params: Some(csp::CursorMovedNotification {
-                                client_id,
-                                location: location.into(),
-                            }),
-                        })?;
-
-                        writer.write_all(&notification).await?;
-                    }
-                    net::send::Message::DocumentEditedFull { client_id, uri, content } => {
-                        let uri = state.lock().await.get_cwd().join(uri);
-                        let notification = rpc::encode(Notification::<csp::DocumentEditedFull> {
-                            method: "document/edited".into(),
-                            params: Some(csp::DocumentEditedFull {
-                                client_id,
-                                mode: csp::DocumentEditMode::Full,
-                                uri,
-                                content,
-                            }),
-                        })?;
-
-                        writer.write_all(&notification).await?;
-                    }
-                    _ => {}
+                if result.should_shutdown {
+                    shutting_down = true;
                 }
             }
 
@@ -231,7 +156,7 @@ async fn handle_input(
     let decoded = rpc::decode(scanner).await?;
 
     logger
-        .log(format!("Handling method: {}", decoded.method).as_str())
+        .log(format!("Handling editor method: {}", decoded.method).as_str())
         .await?;
 
     logger
@@ -267,7 +192,7 @@ async fn handle_message(
 
             if let Some(InitializeOptions {
                 client_projects_root: Some(client_projects_root),
-            }) = &params.initialize_options
+            }) = params.initialize_options
             {
                 if state.is_client() {
                     state.set_cwd(client_projects_root);
@@ -360,7 +285,7 @@ async fn handle_message(
                 .await?;
 
             let request = rpc::encode(Request::<LocationRequest> {
-                id: Some(generate_id()),
+                id: Some(next_request_id()),
                 method: "document/location".into(),
                 params: None,
             })?;
@@ -437,6 +362,165 @@ async fn handle_message(
     }
 }
 
+async fn handle_network_message(
+    message: Message,
+    writer: &mut (impl AsyncWrite + Unpin),
+    state: Arc<Mutex<State>>,
+    mut logger: Arc<Mutex<Logger>>,
+) -> DynResult<HandledNetworkMessage> {
+    logger
+        .log(&format!("Received from network: {}", message))
+        .await?;
+
+    // Handle the message here
+    // You might want to send responses back using send_thread
+    match message {
+        net::send::Message::Shutdown(Some(id)) => {
+            let response = rpc::encode(Response::<ShutdownResponse> { id, result: None })?;
+
+            logger.log("Sending shutdown response to editor").await?;
+            writer.write_all(&response).await?;
+            logger.log("Sent shutdown response to editor").await?;
+
+            Ok(HandledNetworkMessage {
+                should_shutdown: true,
+            })
+        }
+        net::send::Message::Shutdown(None) => {
+            let request = rpc::encode(Request::<ShutdownRequest> {
+                id: None,
+                method: "shutdown".into(),
+                params: None,
+            })?;
+
+            logger.log("Sending shutdown request to editor").await?;
+            writer.write_all(&request).await?;
+            logger.log("Sent shutdown request to editor").await?;
+
+            Ok(HandledNetworkMessage {
+                should_shutdown: true,
+            })
+        }
+        net::send::Message::Fingerprint(fingerprint) => {
+            state.lock().await.set_fingerprint(fingerprint.clone());
+
+            let notification = rpc::encode(Notification::<FingerprintGeneratedNotification> {
+                method: "fingerprint_generated".into(),
+                params: Some(FingerprintGeneratedNotification { fingerprint }),
+            })?;
+
+            writer.write_all(&notification).await?;
+
+            Ok(HandledNetworkMessage {
+                should_shutdown: false,
+            })
+        }
+        net::send::Message::InitialFileUri { uri } => {
+            logger
+                .log(&format!(
+                    "200 Received initial file URI: {:?} CWD: {:?}",
+                    uri,
+                    state.lock().await.get_cwd()
+                ))
+                .await?;
+
+            let request = rpc::encode(Request::<csp::InitialFileUriRequest> {
+                id: Some(next_request_id()),
+                method: "initial_file_uri".into(),
+                params: Some(csp::InitialFileUriRequest {
+                    cwd: state.lock().await.get_cwd(),
+                    initial_file_uri: uri,
+                }),
+            })?;
+
+            writer.write_all(&request).await?;
+
+            Ok(HandledNetworkMessage {
+                should_shutdown: false,
+            })
+        }
+        net::send::Message::ClientInitialized(client_id) => {
+            let state = state.lock().await;
+
+            if state.is_client() {
+                logger
+                    .log(&format!(
+                        "client initialized received on client: {}",
+                        client_id
+                    ))
+                    .await?;
+            }
+
+            Ok(HandledNetworkMessage {
+                should_shutdown: false,
+            })
+        }
+        net::send::Message::Initialized(client_id) => {
+            let state = state.lock().await;
+
+            if state.is_client() {
+                logger
+                    .log(&format!("initialized received on client: {}", client_id))
+                    .await?;
+
+                let notification = rpc::encode(Notification::<csp::ClientIdChangedNotification> {
+                    method: "client_id_changed".into(),
+                    params: Some(csp::ClientIdChangedNotification { client_id }),
+                })?;
+
+                writer.write_all(&notification).await?;
+            }
+
+            Ok(HandledNetworkMessage {
+                should_shutdown: false,
+            })
+        }
+        net::send::Message::CursorMoved {
+            client_id,
+            location,
+        } => {
+            let notification = rpc::encode(Notification::<csp::CursorMovedNotification> {
+                method: "cursor_moved".into(),
+                params: Some(csp::CursorMovedNotification {
+                    client_id,
+                    location: location.into(),
+                }),
+            })?;
+
+            writer.write_all(&notification).await?;
+
+            Ok(HandledNetworkMessage {
+                should_shutdown: false,
+            })
+        }
+        net::send::Message::DocumentEditedFull {
+            client_id,
+            uri,
+            content,
+        } => {
+            let uri = state.lock().await.get_cwd().join(uri);
+            let notification = rpc::encode(Notification::<csp::DocumentEditedFull> {
+                method: "document/edited".into(),
+                params: Some(csp::DocumentEditedFull {
+                    client_id,
+                    mode: csp::DocumentEditMode::Full,
+                    uri,
+                    content,
+                }),
+            })?;
+
+            writer.write_all(&notification).await?;
+
+            Ok(HandledNetworkMessage {
+                should_shutdown: false,
+            })
+        }
+        _ => Ok(HandledNetworkMessage {
+            should_shutdown: false,
+        }),
+    }
+}
+
 async fn get_logger(cli: &Cli) -> DynResult<Logger> {
     if cli.log_to_stderr {
         return Ok(Logger::new(Box::new(io::stderr())));
@@ -499,6 +583,10 @@ pub struct HandledMessage {
     should_exit: bool,
 }
 
+pub struct HandledNetworkMessage {
+    should_shutdown: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -529,7 +617,7 @@ mod tests {
             &content,
             &mut writer,
             &sender,
-            State::new(PathBuf::new(), None, true, "0".into()),
+            State::new(PathBuf::new(), None, true, next_client_id()),
             logger,
         )
         .await

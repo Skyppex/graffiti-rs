@@ -1,4 +1,4 @@
-use futures_util::SinkExt;
+use futures_util::{SinkExt, TryFutureExt};
 use ignore::WalkBuilder;
 use std::{path::PathBuf, sync::Arc};
 use tokio::{
@@ -8,6 +8,7 @@ use tokio::{
 use tokio_tungstenite::tungstenite::{Message, Utf8Bytes};
 
 use crate::{
+    id::next_client_id,
     net::send,
     ppp::{self, DirectoriesUploadNotification, Directory, DirectoryType},
     rpc,
@@ -29,7 +30,7 @@ pub async fn handle_message<S: AsyncStream>(
     mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
     if let Message::Text(text) = msg {
-        logger.log(&format!("Received message: {}", text)).await?;
+        logger.log(&format!("Received network message")).await?;
 
         let decoded = rpc::decode_message(text.to_string()).await?;
 
@@ -68,36 +69,7 @@ async fn handle_request<S: AsyncStream>(
             .log("received initialize request from client")
             .await?;
 
-        let response = rpc::encode(Response::<InitializeResponse> {
-            id,
-            result: Some(InitializeResponse {
-                host_info: Some(HostInfo {
-                    name: "graffiti-rs".to_string(),
-                    version: Some("0.1.0".to_string()),
-                }),
-                client_id: "1".into(),
-                project_dir_name: PathBuf::from(
-                    state
-                        .lock()
-                        .await
-                        .get_cwd()
-                        .file_name()
-                        .expect("Unable to get project directory name"),
-                ),
-            }),
-        })?;
-
-        logger.log("sending initialize response to client").await?;
-        logger
-            .log(&format!(
-                "response: {}",
-                String::from_utf8(response.clone()).unwrap()
-            ))
-            .await?;
-        writer
-            .send(Message::Text(Utf8Bytes::try_from(response)?))
-            .await?;
-        logger.log("sent initialize response to client").await?;
+        ppp::send::initialize_response(id, state, writer, logger).await?;
     }
 
     Ok(())
@@ -107,7 +79,7 @@ async fn handle_response<S: AsyncStream>(
     id: String,
     content: Vec<u8>,
     state: Arc<Mutex<State>>,
-    _sender: &Sender<send::Message>,
+    sender: &Sender<send::Message>,
     writer: &mut WsWriter<S>,
     mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
@@ -122,9 +94,32 @@ async fn handle_response<S: AsyncStream>(
             "initialize" => {
                 logger.log("Received initialize response from host").await?;
                 let result = rpc::decode_result::<InitializeResponse>(&content)?;
-                state.set_cwd_from_remote_projects_path(&result.project_dir_name);
-                tokio::fs::create_dir_all(state.get_cwd()).await?;
-                ppp::send::initialized(writer, logger).await?;
+                let new_cwd = state.get_cwd_from_remote_projects_path(&result.project_dir_name);
+
+                logger
+                    .log(&format!(
+                        "moving to directory: {}",
+                        new_cwd.to_string_lossy()
+                    ))
+                    .await;
+
+                tokio::fs::create_dir_all(&new_cwd).await?;
+                state.set_cwd(new_cwd);
+                state.set_client_id(result.client_id);
+
+                logger
+                    .log(&format!(
+                        "aaaaaaaaaaaaaaa my client id is {}",
+                        state.client_id
+                    ))
+                    .await?;
+
+                tokio::try_join!(
+                    sender
+                        .send(send::Message::Initialized(state.client_id.clone()))
+                        .map_err(|e| e.into()),
+                    ppp::send::initialized(writer, logger)
+                )?;
             }
             other => Err(format!("unknown method: {}", other))?,
         }

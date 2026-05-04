@@ -4,7 +4,13 @@ use futures_util::SinkExt;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::{Message, Utf8Bytes};
 
-use crate::{rpc, state::State, utils::generate_id, DynResult, Log, Logger};
+use crate::{
+    id::{next_client_id, next_request_id},
+    ppp::{HostInfo, InitializeResponse, Response},
+    rpc,
+    state::State,
+    DynResult, Log, Logger,
+};
 
 use super::{
     AsyncStream, ClientInfo, CursorMovedNotification, DirectoriesUploadNotification, Directory,
@@ -20,7 +26,7 @@ pub async fn initialize<S: AsyncStream>(
     logger.log("sending initialize to host").await?;
 
     let request = Request::<InitializeRequest> {
-        id: generate_id(),
+        id: next_request_id(),
         method: "initialize".into(),
         params: Some(InitializeRequest {
             process_id: None,
@@ -39,6 +45,48 @@ pub async fn initialize<S: AsyncStream>(
     writer
         .send(Message::Text(Utf8Bytes::try_from(encoded)?))
         .await?;
+
+    Ok(())
+}
+
+pub async fn initialize_response<S: AsyncStream>(
+    id: String,
+    state: Arc<Mutex<State>>,
+    writer: &mut WsWriter<S>,
+    mut logger: Arc<Mutex<Logger>>,
+) -> DynResult<()> {
+    let response = rpc::encode(Response::<InitializeResponse> {
+        id,
+        result: Some(InitializeResponse {
+            host_info: Some(HostInfo {
+                name: "graffiti-rs".to_string(),
+                version: Some("0.1.0".to_string()),
+            }),
+            client_id: next_client_id(),
+            project_dir_name: PathBuf::from(
+                state
+                    .lock()
+                    .await
+                    .get_cwd()
+                    .file_name()
+                    .expect("Unable to get project directory name"),
+            ),
+        }),
+    })?;
+
+    logger.log("sending initialize response to client").await?;
+    logger
+        .log(&format!(
+            "response: {}",
+            String::from_utf8(response.clone()).unwrap()
+        ))
+        .await?;
+
+    writer
+        .send(Message::Text(Utf8Bytes::try_from(response)?))
+        .await?;
+
+    logger.log("sent initialize response to client").await?;
 
     Ok(())
 }

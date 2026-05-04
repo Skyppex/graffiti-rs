@@ -44,6 +44,10 @@ impl State {
         }))
     }
 
+    pub fn set_client_id(&mut self, client_id: String) {
+        self.client_id = client_id;
+    }
+
     pub fn _is_host(&self) -> bool {
         self.is_host
     }
@@ -56,24 +60,25 @@ impl State {
         self.cwd.clone()
     }
 
-    pub fn set_cwd(&mut self, cwd: &Path) {
-        self.cwd = cwd.to_path_buf();
-        std::env::set_current_dir(&cwd).expect("current dir couldn't be set");
+    pub fn set_cwd(&mut self, cwd: PathBuf) {
+        self.cwd = cwd;
+
+        std::env::set_current_dir(&self.cwd).expect(&format!(
+            "current dir couldn't be set to {}",
+            self.cwd.to_string_lossy()
+        ));
     }
 
     pub fn _set_remote_projects_path(&mut self, remote_projects_path: PathBuf) {
         self.remote_projects_path = Some(remote_projects_path);
     }
 
-    pub fn set_cwd_from_remote_projects_path(&mut self, project_dir_name: &Path) {
-        self.set_cwd(
-            &self
-                .remote_projects_path
-                .clone()
-                .unwrap_or_else(|| dirs::data_local_dir().expect("failed to get data local dir"))
-                .join("graffiti")
-                .join(project_dir_name),
-        )
+    pub fn get_cwd_from_remote_projects_path(&mut self, project_dir_name: &Path) -> PathBuf {
+        self.remote_projects_path
+            .clone()
+            .unwrap_or_else(|| dirs::data_local_dir().expect("failed to get data local dir"))
+            .join("graffiti")
+            .join(project_dir_name)
     }
 
     pub fn get_ignore_file(&self) -> Option<PathBuf> {
