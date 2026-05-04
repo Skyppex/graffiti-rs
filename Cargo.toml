@@ -7,15 +7,25 @@ edition = "2021"
 chrono = "0.4.39"
 clap = { version = "4.5.21", features = ["derive"] }
 dirs = "6.0.0"
-rustls = { version = "0.23.23", features = [
+futures-util = "0.3.31"
+hex = "0.4.3"
+ignore = "0.4.23"
+rcgen = "0.13.2"
+reqwest = { version = "0.12.22", default-features = false, features = [
+  "json",
+  "rustls-tls-native-roots"
+] }
+rustls = { version = "0.23.23", default-features = false, features = [
   "log",
   "logging",
   "ring",
   "std",
   "tls12",
-], default-features = false }
+] }
+rustls-native-certs = "0.8.1"
 serde = { version = "1.0.215", features = ["derive"] }
 serde_json = "1.0.133"
+sha2 = "0.10.8"
 tokio = { version = "1.43.0", features = [
   "fs",
   "io-std",
@@ -24,25 +34,18 @@ tokio = { version = "1.43.0", features = [
   "rt-multi-thread",
   "sync",
 ] }
+tokio-rustls = { version = "0.26.1", default-features = false, features = [
+  "logging",
+  "ring",
+  "tls12",
+] }
 tokio-tungstenite = { version = "0.26.2", features = [
   "rustls",
   "rustls-tls-native-roots",
 ] }
-futures-util = "0.3.31"
-rcgen = "0.13.2"
-tokio-rustls = { version = "0.26.1", default-features = false, features = [
-  "logging",
-  "tls12",
-  "ring",
-] }
-rustls-native-certs = "0.8.1"
-sha2 = "0.10.8"
-hex = "0.4.3"
-walkdir = "2.5.0"
-ignore = "0.4.23"
-uuid = { version = "1.16.0", features = ["v4"] }
 twox-hash = "2.1.0"
-reqwest = { version = "0.12.22", features = ["json"] }
+uuid = { version = "1.16.0", features = ["v4"] }
+walkdir = "2.5.0"
 
 [dev-dependencies]
 fluid = "0.4"

@@ -1,8 +1,7 @@
 use std::{future::Future, net::IpAddr, str::FromStr, sync::Arc};
 
 use futures_util::{
-    sink::{Close, Send},
-    stream::{Next, SplitSink, SplitStream},
+    stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
 };
 
@@ -13,13 +12,7 @@ use rustls::{
     ClientConfig, ServerConfig, SignatureScheme,
 };
 use sha2::{Digest, Sha256};
-use tokio::{
-    net::{TcpListener, TcpStream},
-    sync::{
-        mpsc::{Receiver, Sender},
-        Mutex,
-    },
-};
+use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{server::TlsStream, TlsAcceptor};
 use tokio_tungstenite::{
     accept_async_with_config, connect_async_tls_with_config,
@@ -27,10 +20,11 @@ use tokio_tungstenite::{
     Connector, MaybeTlsStream, WebSocketStream,
 };
 
-use crate::{id::next_client_id, ppp, state::State, DynResult, Log, Logger};
+use crate::DynResult;
 
 pub enum ConnectionMode {
     Direct,
+    Ssh,
 }
 
 pub enum Connection {
@@ -108,7 +102,7 @@ impl Connection {
             let listener = TcpListener::bind(uri).await?;
             // logger.log(&format!("Listening on {}", uri)).await?;
 
-            let (socket, addr) = listener.accept().await?;
+            let (socket, _) = listener.accept().await?;
 
             let tls_stream = match tls_acceptor.accept(socket).await {
                 Ok(s) => s,
@@ -134,7 +128,7 @@ impl Connection {
 
             (
                 fp.to_vec(),
-                ip_from_octets(ip).ok_or_else(|| "couldn't create ip from octets")?,
+                ip_from_octets(ip).ok_or("couldn't create ip from octets")?,
             )
         };
 
@@ -200,27 +194,30 @@ impl Connection {
 }
 
 impl ConnectionWriter {
-    pub async fn send(&mut self, msg: Message) -> Send<'_, ConnectionWriter, Message> {
+    pub async fn send(&mut self, msg: Message) -> DynResult<()> {
         match self {
             ConnectionWriter::DirectHost(stream) => stream.send(msg).await,
             ConnectionWriter::DirectClient(stream) => stream.send(msg).await,
         }
+        .map_err(|e| e.into())
     }
 
-    pub async fn close(&mut self) -> Close<'_, ConnectionWriter, Message> {
+    pub async fn close(&mut self) -> DynResult<()> {
         match self {
             ConnectionWriter::DirectHost(stream) => stream.close().await,
             ConnectionWriter::DirectClient(stream) => stream.close().await,
         }
+        .map_err(|e| e.into())
     }
 }
 
 impl ConnectionReader {
-    pub async fn next(&mut self) -> Next<'_, ConnectionReader> {
+    pub async fn next(&mut self) -> Option<DynResult<Message>> {
         match self {
             ConnectionReader::DirectHost(stream) => stream.next().await,
             ConnectionReader::DirectClient(stream) => stream.next().await,
         }
+        .map(|v| v.map_err(|e| e.into()))
     }
 }
 

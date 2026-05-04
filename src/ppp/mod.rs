@@ -3,18 +3,9 @@ pub mod send;
 
 use std::path::PathBuf;
 
-use futures_util::stream::SplitSink;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
 
 use crate::csp;
-
-pub type WsWriter<S> = SplitSink<WebSocketStream<S>, Message>;
-
-pub trait AsyncStream: AsyncWrite + AsyncRead + Unpin {}
-
-impl<S: AsyncWrite + AsyncRead + Unpin> AsyncStream for S {}
 
 pub trait Req {
     fn id(&self) -> String;

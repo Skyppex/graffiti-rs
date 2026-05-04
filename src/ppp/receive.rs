@@ -1,14 +1,13 @@
-use futures_util::{SinkExt, TryFutureExt};
+use futures_util::TryFutureExt;
 use ignore::WalkBuilder;
 use std::{path::PathBuf, sync::Arc};
 use tokio::{
     io::AsyncWriteExt,
     sync::{mpsc::Sender, Mutex},
 };
-use tokio_tungstenite::tungstenite::{Message, Utf8Bytes};
+use tokio_tungstenite::tungstenite::Message;
 
 use crate::{
-    id::next_client_id,
     net::{connection::ConnectionWriter, send},
     ppp::{self, DirectoriesUploadNotification, Directory, DirectoryType},
     rpc,
@@ -17,12 +16,11 @@ use crate::{
 };
 
 use super::{
-    AsyncStream, CursorMovedNotification, DocumentEditFullNotification,
-    DocumentEditModeNotification, HostInfo, InitialFileNotification, InitializeResponse,
-    InitializedNotification, Response, WsWriter,
+    CursorMovedNotification, DocumentEditFullNotification, DocumentEditModeNotification,
+    InitialFileNotification, InitializeResponse, InitializedNotification,
 };
 
-pub async fn handle_message<S: AsyncStream>(
+pub async fn handle_message(
     msg: Message,
     state: Arc<Mutex<State>>,
     writer: &mut ConnectionWriter,
@@ -30,7 +28,7 @@ pub async fn handle_message<S: AsyncStream>(
     mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
     if let Message::Text(text) = msg {
-        logger.log(&format!("Received network message")).await?;
+        logger.log("Received network message").await?;
 
         let decoded = rpc::decode_message(text.to_string()).await?;
 
@@ -56,7 +54,7 @@ pub async fn handle_message<S: AsyncStream>(
     Ok(())
 }
 
-async fn handle_request<S: AsyncStream>(
+async fn handle_request(
     id: String,
     method: &str,
     _content: Vec<u8>,
@@ -75,7 +73,7 @@ async fn handle_request<S: AsyncStream>(
     Ok(())
 }
 
-async fn handle_response<S: AsyncStream>(
+async fn handle_response(
     id: String,
     content: Vec<u8>,
     state: Arc<Mutex<State>>,
@@ -101,17 +99,14 @@ async fn handle_response<S: AsyncStream>(
                         "moving to directory: {}",
                         new_cwd.to_string_lossy()
                     ))
-                    .await;
+                    .await?;
 
                 tokio::fs::create_dir_all(&new_cwd).await?;
                 state.set_cwd(new_cwd);
                 state.set_client_id(result.client_id);
 
                 logger
-                    .log(&format!(
-                        "aaaaaaaaaaaaaaa my client id is {}",
-                        state.client_id
-                    ))
+                    .log(&format!("my client id is {}", state.client_id))
                     .await?;
 
                 tokio::try_join!(
@@ -128,7 +123,7 @@ async fn handle_response<S: AsyncStream>(
     Ok(())
 }
 
-async fn handle_notification<S: AsyncStream>(
+async fn handle_notification(
     method: &str,
     content: Vec<u8>,
     state: Arc<Mutex<State>>,

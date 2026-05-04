@@ -52,7 +52,11 @@ async fn main() -> DynResult<()> {
         .await?;
 
     let next_client_id = next_client_id();
-    logger.log(&format!("next_client_id = {}", next_client_id));
+
+    logger
+        .log(&format!("next_client_id = {}", next_client_id))
+        .await?;
+
     let state = State::new(cwd, cli.graffitiignore, is_host, next_client_id);
 
     logger

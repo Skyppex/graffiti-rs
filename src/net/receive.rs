@@ -4,12 +4,10 @@ use tokio::sync::Mutex;
 
 use crate::{
     net::connection::ConnectionWriter,
-    ppp::{self, AsyncStream, DocumentLocation},
+    ppp::{self, DocumentLocation},
     state::State,
     DynResult, Logger,
 };
-
-use super::WsWriter;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
@@ -32,7 +30,7 @@ impl Display for Message {
     }
 }
 
-pub async fn handle_message<S: AsyncStream>(
+pub async fn handle_message(
     message: Message,
     state: Arc<Mutex<State>>,
     writer: &mut ConnectionWriter,

@@ -1,6 +1,5 @@
 use std::{path::PathBuf, sync::Arc};
 
-use futures_util::SinkExt;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::{Message, Utf8Bytes};
 
@@ -14,12 +13,12 @@ use crate::{
 };
 
 use super::{
-    AsyncStream, ClientInfo, CursorMovedNotification, DirectoriesUploadNotification, Directory,
+    ClientInfo, CursorMovedNotification, DirectoriesUploadNotification, Directory,
     DocumentEditFullNotification, DocumentEditMode, DocumentLocation, InitialFileNotification,
-    InitializeRequest, InitializedNotification, Notification, Request, WsWriter,
+    InitializeRequest, InitializedNotification, Notification, Request,
 };
 
-pub async fn initialize<S: AsyncStream>(
+pub async fn initialize(
     state: Arc<Mutex<State>>,
     writer: &mut ConnectionWriter,
     mut logger: Arc<Mutex<Logger>>,
@@ -50,7 +49,7 @@ pub async fn initialize<S: AsyncStream>(
     Ok(())
 }
 
-pub async fn initialize_response<S: AsyncStream>(
+pub async fn initialize_response(
     id: String,
     state: Arc<Mutex<State>>,
     writer: &mut ConnectionWriter,
@@ -92,7 +91,7 @@ pub async fn initialize_response<S: AsyncStream>(
     Ok(())
 }
 
-pub async fn initialized<S: AsyncStream>(
+pub async fn initialized(
     writer: &mut ConnectionWriter,
     mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
@@ -112,7 +111,7 @@ pub async fn initialized<S: AsyncStream>(
     Ok(())
 }
 
-pub async fn cursor_moved<S: AsyncStream>(
+pub async fn cursor_moved(
     writer: &mut ConnectionWriter,
     client_id: String,
     location: DocumentLocation,
@@ -135,7 +134,7 @@ pub async fn cursor_moved<S: AsyncStream>(
     Ok(())
 }
 
-pub async fn document_edit_full<S: AsyncStream>(
+pub async fn document_edit_full(
     writer: &mut ConnectionWriter,
     client_id: String,
     uri: PathBuf,
@@ -161,7 +160,7 @@ pub async fn document_edit_full<S: AsyncStream>(
     Ok(())
 }
 
-pub async fn directories_upload<S: AsyncStream>(
+pub async fn directories_upload(
     writer: &mut ConnectionWriter,
     client_id: String,
     directories: Vec<Directory>,
@@ -184,7 +183,7 @@ pub async fn directories_upload<S: AsyncStream>(
     Ok(())
 }
 
-pub async fn initial_file_uri<S: AsyncStream>(
+pub async fn initial_file_uri(
     writer: &mut ConnectionWriter,
     uri: PathBuf,
     mut logger: Arc<Mutex<Logger>>,
