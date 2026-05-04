@@ -51,13 +51,15 @@
           pkgConfig = pkgs.pkg-config;
           inherit release;
         };
+
       checks = import ./checks.nix {
         src = self;
         naersk = naerskLib;
-        pkgs = pkgs;
+        inherit pkgs;
       };
+
       apps = import ./apps.nix {
-        pkgs = pkgs;
+        inherit pkgs;
       };
     in {
       packages = rec {
@@ -66,6 +68,9 @@
         release = graffitiPackage {release = true;};
       };
 
+      inherit checks;
+      inherit apps;
+
       devShells.default = pkgs.mkShell {
         packages = with pkgs; [
           toolchain
@@ -73,6 +78,7 @@
           alejandra
           nil
         ];
+
         env.RUST_SRC_PATH = "${toolchain}/lib/rustlib/src/rust/library";
         LD_LIBRARY_PATH = with pkgs; lib.makeLibraryPath [openssl];
         shellHook = ''
@@ -82,10 +88,6 @@
           fi
         '';
       };
-
-      checks = checks;
-
-      apps = apps;
 
       formatter = pkgs.writeShellApplication {
         name = "fmt";
