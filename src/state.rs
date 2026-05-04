@@ -63,10 +63,12 @@ impl State {
     pub fn set_cwd(&mut self, cwd: PathBuf) {
         self.cwd = cwd;
 
-        std::env::set_current_dir(&self.cwd).expect(&format!(
-            "current dir couldn't be set to {}",
-            self.cwd.to_string_lossy()
-        ));
+        std::env::set_current_dir(&self.cwd).unwrap_or_else(|_| {
+            panic!(
+                "current dir couldn't be set to {}",
+                self.cwd.to_string_lossy()
+            )
+        });
     }
 
     pub fn _set_remote_projects_path(&mut self, remote_projects_path: PathBuf) {

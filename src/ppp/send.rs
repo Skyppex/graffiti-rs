@@ -1,11 +1,10 @@
 use std::{path::PathBuf, sync::Arc};
 
 use tokio::sync::Mutex;
-use tokio_tungstenite::tungstenite::{Message, Utf8Bytes};
 
 use crate::{
     id::{next_client_id, next_request_id},
-    net::connection::ConnectionWriter,
+    net::connection::{ConnectionWriter, Message},
     ppp::{HostInfo, InitializeResponse, Response},
     rpc,
     state::State,
@@ -42,9 +41,7 @@ pub async fn initialize(
 
     state.lock().await.add_net_req(Box::new(request));
 
-    writer
-        .send(Message::Text(Utf8Bytes::try_from(encoded)?))
-        .await?;
+    writer.send(Message::Data(encoded)).await?;
 
     Ok(())
 }
@@ -82,9 +79,7 @@ pub async fn initialize_response(
         ))
         .await?;
 
-    writer
-        .send(Message::Text(Utf8Bytes::try_from(response)?))
-        .await?;
+    writer.send(Message::Data(response)).await?;
 
     logger.log("sent initialize response to client").await?;
 
@@ -104,9 +99,7 @@ pub async fn initialized(
         }),
     })?;
 
-    writer
-        .send(Message::Text(Utf8Bytes::try_from(request)?))
-        .await?;
+    writer.send(Message::Data(request)).await?;
 
     Ok(())
 }
@@ -127,9 +120,7 @@ pub async fn cursor_moved(
         }),
     })?;
 
-    writer
-        .send(Message::Text(Utf8Bytes::try_from(request)?))
-        .await?;
+    writer.send(Message::Data(request)).await?;
 
     Ok(())
 }
@@ -153,9 +144,7 @@ pub async fn document_edit_full(
         }),
     })?;
 
-    writer
-        .send(Message::Text(Utf8Bytes::try_from(notification)?))
-        .await?;
+    writer.send(Message::Data(notification)).await?;
 
     Ok(())
 }
@@ -176,9 +165,7 @@ pub async fn directories_upload(
         }),
     })?;
 
-    writer
-        .send(Message::Text(Utf8Bytes::try_from(notification)?))
-        .await?;
+    writer.send(Message::Data(notification)).await?;
 
     Ok(())
 }
@@ -195,9 +182,7 @@ pub async fn initial_file_uri(
         params: Some(InitialFileNotification { uri }),
     })?;
 
-    writer
-        .send(Message::Text(Utf8Bytes::try_from(notification)?))
-        .await?;
+    writer.send(Message::Data(notification)).await?;
 
     Ok(())
 }

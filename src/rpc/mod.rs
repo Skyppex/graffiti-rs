@@ -1,8 +1,13 @@
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{from_slice, to_string};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader},
+    sync::Mutex,
+};
 
-use crate::DynResult;
+use crate::{DynResult, Logger};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct IdProp {
@@ -57,8 +62,8 @@ pub async fn decode(scanner: &mut BufReader<impl AsyncRead + Unpin>) -> DynResul
     })
 }
 
-pub async fn decode_message(message: String) -> DynResult<NetMessageInfo> {
-    let scanner = &mut BufReader::new(message.as_bytes());
+pub async fn decode_message(message: &[u8]) -> DynResult<NetMessageInfo> {
+    let scanner = &mut BufReader::new(message);
 
     let content_length = read_headers(scanner).await?;
 

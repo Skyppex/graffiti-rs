@@ -5,10 +5,12 @@ use tokio::{
     io::AsyncWriteExt,
     sync::{mpsc::Sender, Mutex},
 };
-use tokio_tungstenite::tungstenite::Message;
 
 use crate::{
-    net::{connection::ConnectionWriter, send},
+    net::{
+        connection::{ConnectionWriter, Message},
+        send,
+    },
     ppp::{self, DirectoriesUploadNotification, Directory, DirectoryType},
     rpc,
     state::{self, State},
@@ -27,10 +29,15 @@ pub async fn handle_message(
     sender: &Sender<send::Message>,
     mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
-    if let Message::Text(text) = msg {
+    if let Message::Data(data) = msg {
         logger.log("Received network message").await?;
+        logger.log(&format!("data: {:?}", &data)).await?;
 
-        let decoded = rpc::decode_message(text.to_string()).await?;
+        let decoded = rpc::decode_message(&data).await;
+
+        logger.log(&format!("{:?}", decoded)).await?;
+
+        let decoded = decoded?;
 
         let id = decoded.id;
         let method = decoded.method;

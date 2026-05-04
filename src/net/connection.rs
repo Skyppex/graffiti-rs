@@ -6,21 +6,106 @@ use futures_util::{
 };
 
 use rcgen::CertifiedKey;
+use russh::{
+    client,
+    keys::{ssh_key, Algorithm, HashAlg, PrivateKey},
+    server, Channel, ChannelMsg, ChannelStream,
+};
 use rustls::{
     client::danger::{ServerCertVerified, ServerCertVerifier},
     pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
     ClientConfig, ServerConfig, SignatureScheme,
 };
 use sha2::{Digest, Sha256};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::{
+    io::{ReadHalf, WriteHalf},
+    net::{TcpListener, TcpStream},
+    sync::{oneshot, Mutex},
+};
 use tokio_rustls::{server::TlsStream, TlsAcceptor};
 use tokio_tungstenite::{
     accept_async_with_config, connect_async_tls_with_config,
-    tungstenite::{http::Uri, Message},
+    tungstenite::{self, http::Uri, Utf8Bytes},
     Connector, MaybeTlsStream, WebSocketStream,
 };
+use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
-use crate::DynResult;
+use crate::{DynError, DynResult, Log, Logger};
+
+#[derive(Debug, Clone)]
+pub enum Message {
+    Data(Vec<u8>),
+    Close,
+}
+
+impl From<tungstenite::Message> for Message {
+    fn from(value: tungstenite::Message) -> Self {
+        match value {
+            tungstenite::Message::Text(data) => Message::Data(data.bytes().collect::<Vec<_>>()),
+            tungstenite::Message::Close(_) => Message::Close,
+            _ => todo!("unhandled message type (wss)"),
+        }
+    }
+}
+
+impl TryInto<tungstenite::Message> for Message {
+    type Error = DynError;
+
+    fn try_into(self) -> Result<tungstenite::Message, Self::Error> {
+        match self {
+            Message::Data(data) => Ok(tungstenite::Message::Text(Utf8Bytes::try_from(data)?)),
+            Message::Close => Ok(tungstenite::Message::Close(None)),
+        }
+    }
+}
+
+impl From<Message> for Vec<u8> {
+    fn from(val: Message) -> Self {
+        match val {
+            Message::Data(data) => [[0].to_vec(), data].concat(),
+            Message::Close => vec![1],
+        }
+    }
+}
+
+impl TryFrom<Vec<u8>> for Message {
+    type Error = DynError;
+
+    fn try_from(mut value: Vec<u8>) -> Result<Self, Self::Error> {
+        if value.is_empty() {
+            return Err("failed to deserialize bytes into message".into());
+        }
+
+        value.push(0);
+        let end = value.len() - 1;
+        value.swap(0, end);
+
+        let message_type = value.remove(end);
+
+        match message_type {
+            // data
+            0 => {
+                let slice = &value[1..];
+                Ok(Message::Data(slice.to_vec()))
+            }
+            // close
+            1 => Ok(Message::Close),
+            _ => unreachable!("unknown message type"),
+        }
+    }
+}
+
+impl TryFrom<ChannelMsg> for Message {
+    type Error = DynError;
+
+    fn try_from(value: ChannelMsg) -> Result<Self, Self::Error> {
+        match value {
+            ChannelMsg::Data { data } => Ok(data.to_vec().try_into()?),
+            ChannelMsg::Close => Ok(Message::Close),
+            _ => todo!("unhandled message type (ssh)"),
+        }
+    }
+}
 
 pub enum ConnectionMode {
     Direct,
@@ -30,16 +115,22 @@ pub enum ConnectionMode {
 pub enum Connection {
     DirectHost(WebSocketStream<TlsStream<TcpStream>>),
     DirectClient(WebSocketStream<MaybeTlsStream<TcpStream>>),
+    SshHost(ChannelStream<server::Msg>),
+    SshClient(ChannelStream<client::Msg>),
 }
 
 pub enum ConnectionWriter {
-    DirectHost(SplitSink<WebSocketStream<TlsStream<TcpStream>>, Message>),
-    DirectClient(SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>),
+    DirectHost(SplitSink<WebSocketStream<TlsStream<TcpStream>>, tungstenite::Message>),
+    DirectClient(SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, tungstenite::Message>),
+    SshHost(FramedWrite<WriteHalf<ChannelStream<server::Msg>>, LengthDelimitedCodec>),
+    SshClient(FramedWrite<WriteHalf<ChannelStream<client::Msg>>, LengthDelimitedCodec>),
 }
 
 pub enum ConnectionReader {
     DirectHost(SplitStream<WebSocketStream<TlsStream<TcpStream>>>),
     DirectClient(SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>),
+    SshHost(FramedRead<ReadHalf<ChannelStream<server::Msg>>, LengthDelimitedCodec>),
+    SshClient(FramedRead<ReadHalf<ChannelStream<client::Msg>>, LengthDelimitedCodec>),
 }
 
 struct CertData {
@@ -51,9 +142,9 @@ async fn get_ip() -> DynResult<String> {
     Ok(reqwest::get("https://api.ipify.org").await?.text().await?)
 }
 
-fn generate_cert(public_ip: &IpAddr) -> CertData {
+fn generate_cert(public_ip: String) -> CertData {
     let CertifiedKey { cert, key_pair } =
-        rcgen::generate_simple_self_signed(vec![public_ip.to_string()]).unwrap();
+        rcgen::generate_simple_self_signed(vec![public_ip]).unwrap();
     let cert_der = cert.der();
     let priv_key_der = key_pair.serialize_der();
 
@@ -63,114 +154,228 @@ fn generate_cert(public_ip: &IpAddr) -> CertData {
     }
 }
 
-fn compute_fingerprint(cert: &CertificateDer<'static>, public_ip: &IpAddr) -> String {
+fn compute_fingerprint(data: &[u8], connection_string: Vec<u8>) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(cert.as_ref());
+    hasher.update(data);
     let result = hasher.finalize();
 
-    let octets = match public_ip {
-        IpAddr::V4(v4) => v4.octets().to_vec(),
-        IpAddr::V6(v6) => v6.octets().to_vec(),
-    };
-
-    let result = result.into_iter().chain(octets).collect::<Vec<u8>>();
+    let result = result
+        .into_iter()
+        .chain(connection_string)
+        .collect::<Vec<u8>>();
 
     hex::encode(result)
 }
 
 impl Connection {
-    pub async fn host<F, Fut>(mode: ConnectionMode, fingerprint_generated: F) -> DynResult<Self>
+    pub async fn host<F, Fut>(
+        mode: ConnectionMode,
+        fingerprint_generated: F,
+        mut logger: Arc<Mutex<Logger>>,
+    ) -> DynResult<Self>
     where
         F: FnOnce(String) -> Fut,
         Fut: Future<Output = DynResult<()>>,
     {
-        if let ConnectionMode::Direct = mode {
-            let public_ip = get_ip().await.unwrap_or_else(|_| "127.0.0.1".to_string());
-            let public_ip = IpAddr::from_str(&public_ip)?;
-            let cert_data = generate_cert(&public_ip);
-            let fingerprint = compute_fingerprint(&cert_data.certs[0], &public_ip);
+        match mode {
+            ConnectionMode::Direct => {
+                let ip = get_ip().await.unwrap_or_else(|_| "127.0.0.1".to_string());
+                let cert_data = generate_cert(ip.clone());
+                let ip = IpAddr::from_str(&ip)?;
 
-            fingerprint_generated(fingerprint.clone()).await?;
+                let octets = match ip {
+                    IpAddr::V4(v4) => v4.octets().to_vec(),
+                    IpAddr::V6(v6) => v6.octets().to_vec(),
+                };
 
-            let tls_config = ServerConfig::builder()
-                .with_no_client_auth()
-                .with_single_cert(cert_data.certs, cert_data.key)?;
+                let connection_string = [b"ws://".to_vec(), octets].concat();
+                let fingerprint = compute_fingerprint(&cert_data.certs[0], connection_string);
 
-            let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
+                fingerprint_generated(fingerprint.clone()).await?;
 
-            let uri = "0.0.0.0:8080";
-            let listener = TcpListener::bind(uri).await?;
-            // logger.log(&format!("Listening on {}", uri)).await?;
+                let tls_config = ServerConfig::builder()
+                    .with_no_client_auth()
+                    .with_single_cert(cert_data.certs, cert_data.key)?;
 
-            let (socket, _) = listener.accept().await?;
+                let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
 
-            let tls_stream = match tls_acceptor.accept(socket).await {
-                Ok(s) => s,
-                Err(e) => return Err(Box::new(e)),
-            };
+                let uri = "0.0.0.0:32700";
+                let listener = TcpListener::bind(uri).await?;
+                logger.log(&format!("Listening on {}", uri)).await?;
 
-            let ws_stream = accept_async_with_config(tls_stream, None).await?;
+                let (socket, _) = listener.accept().await?;
 
-            Ok(Connection::DirectHost(ws_stream))
-        } else {
-            todo!()
+                let tls_stream = match tls_acceptor.accept(socket).await {
+                    Ok(s) => s,
+                    Err(e) => return Err(Box::new(e)),
+                };
+
+                let ws_stream = accept_async_with_config(tls_stream, None).await?;
+
+                Ok(Connection::DirectHost(ws_stream))
+            }
+            ConnectionMode::Ssh => {
+                let host = "127.0.0.1".to_string();
+
+                let host_key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)?;
+
+                let connection_string = [b"ssh://".to_vec(), host.as_bytes().to_vec()].concat();
+
+                let fingerprint = compute_fingerprint(
+                    host_key
+                        .public_key()
+                        .fingerprint(HashAlg::Sha256)
+                        .as_bytes(),
+                    connection_string,
+                );
+
+                fingerprint_generated(fingerprint.to_string()).await?;
+
+                let uri = "0.0.0.0:32700";
+                let listener = TcpListener::bind(uri).await?;
+                logger.log(&format!("Listening on {}", uri)).await?;
+
+                let (socket, _) = listener.accept().await?;
+
+                let mut ssh_config = server::Config::default();
+
+                ssh_config.keys.push(host_key);
+
+                let (channel_tx, channel_rx) = oneshot::channel();
+
+                let ssh_handler = ServerFlow {
+                    channel_tx: Some(channel_tx),
+                    logger: logger.clone(),
+                };
+
+                logger
+                    .log(&format!("creating ssh session on {}", uri))
+                    .await?;
+
+                let session = server::run_stream(Arc::new(ssh_config), socket, ssh_handler).await?;
+
+                tokio::spawn(async move {
+                    let _ = session.await;
+                });
+
+                logger
+                    .log(&format!("ssh session created on {}", uri))
+                    .await?;
+
+                let channel = channel_rx.await?;
+
+                logger.log("MMM accepted session creation").await?;
+
+                Ok(Connection::SshHost(channel.into_stream()))
+            }
         }
     }
 
-    pub async fn connect(fingerprint: String) -> DynResult<Self> {
-        let public_ip = get_ip().await.unwrap_or_else(|_| "127.0.0.1".to_string());
-        let public_ip = IpAddr::from_str(&public_ip)?;
+    pub async fn connect(
+        fingerprint_from_out_of_band: String,
+        mut logger: Arc<Mutex<Logger>>,
+    ) -> DynResult<Self> {
+        let ip = get_ip().await.unwrap_or_else(|_| "127.0.0.1".to_string());
 
-        let (fingerprint, server_ip) = {
-            let decoded = hex::decode(fingerprint)?;
+        let (fingerprint, connection_string, connection_mode) = {
+            let decoded = hex::decode(fingerprint_from_out_of_band.clone())?;
 
-            let (fp, ip) = decoded.split_at(32);
+            let (fingerprint, connection_string) = decoded.split_at(32);
 
-            (
-                fp.to_vec(),
-                ip_from_octets(ip).ok_or("couldn't create ip from octets")?,
-            )
-        };
+            let conn_str = String::from_utf8_lossy(connection_string);
+            logger.log(&format!("aaa {}", conn_str)).await?;
 
-        // logger.log(&format!("server ip: {}", server_ip)).await?;
+            let conn_uri = Uri::from_str(&conn_str)?;
 
-        let connection_ip = if server_ip == public_ip {
-            "127.0.0.1".to_string()
-        } else {
-            match server_ip {
-                IpAddr::V4(v4) => v4.to_string(),
-                IpAddr::V6(v6) => format!("[{}]", v6),
+            logger.log(&format!("uri {:?}", conn_uri)).await?;
+            logger
+                .log(&format!("scheme {:?}", conn_uri.scheme_str()))
+                .await?;
+
+            if conn_uri.scheme_str().is_some_and(|s| s == "ssh") {
+                (
+                    fingerprint.to_vec(),
+                    connection_string.to_vec(),
+                    ConnectionMode::Ssh,
+                )
+            } else if conn_uri.scheme_str().is_some_and(|s| s == "wss") {
+                (
+                    fingerprint.to_vec(),
+                    connection_string.to_vec(),
+                    ConnectionMode::Direct,
+                )
+            } else {
+                return Err(format!("unsupported protocol: {:?}", conn_uri.scheme_str()).into());
             }
         };
 
-        let url = format!("wss://{}:8080", connection_ip).parse::<Uri>()?;
-        // logger.log(&format!("Connecting to {}", url)).await?;
+        let connection_string = if connection_string == ip.as_bytes().to_vec() {
+            b"127.0.0.1".to_vec()
+        } else {
+            connection_string
+        };
 
-        let verifier = FingerprintVerifier::new(fingerprint);
+        let uri =
+            format!("{}:32700", String::from_utf8_lossy(&connection_string)).parse::<Uri>()?;
 
-        let tls_config = ClientConfig::builder()
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(verifier))
-            .with_no_client_auth();
+        logger.log(&format!("Connecting to {}", uri)).await?;
 
-        let tls_connector = Connector::Rustls(Arc::new(tls_config));
+        match connection_mode {
+            ConnectionMode::Direct => {
+                let verifier = FingerprintVerifier::new(fingerprint);
 
-        let (ws_stream, _) =
-            connect_async_tls_with_config(url, None, false, Some(tls_connector)).await?;
+                let tls_config = ClientConfig::builder()
+                    .dangerous()
+                    .with_custom_certificate_verifier(Arc::new(verifier))
+                    .with_no_client_auth();
 
-        // logger.log("Connected with pinned certificate").await?;
+                let tls_connector = Connector::Rustls(Arc::new(tls_config));
 
-        Ok(Connection::DirectClient(ws_stream))
+                let (ws_stream, _) =
+                    connect_async_tls_with_config(uri, None, false, Some(tls_connector)).await?;
+
+                // logger.log("Connected with pinned certificate").await?;
+
+                Ok(Connection::DirectClient(ws_stream))
+            }
+            ConnectionMode::Ssh => {
+                let ssh_config = client::Config::default();
+                let ssh_handler = ClientFlow {
+                    connection_string,
+                    expected_fingerprint_hex: fingerprint_from_out_of_band,
+                };
+
+                let host = uri.host().ok_or("missing host")?;
+                let address = format!("{}:32700", host);
+
+                logger
+                    .log(&format!("creating ssh session on {}", &address))
+                    .await?;
+
+                let mut session =
+                    client::connect(Arc::new(ssh_config), &address, ssh_handler).await?;
+
+                logger
+                    .log(&format!("ssh session created on {}", address))
+                    .await?;
+
+                let auth_result = session.authenticate_none("peer").await?;
+
+                if !auth_result.success() {
+                    return Err("failed to authenticate over ssh".into());
+                }
+
+                let channel = session.channel_open_session().await?;
+
+                logger
+                    .log(&format!("ssh session created on {}", address))
+                    .await?;
+
+                Ok(Connection::SshClient(channel.into_stream()))
+            }
+        }
     }
 
-    // pub async fn send(&mut self, msg: Message) -> Send<'_, Connection, Message> {
-    //     match self {
-    //         Connection::DirectHost(stream) => stream.send(msg).await,
-    //         Connection::DirectClient(stream) => stream.send(msg).await,
-    //     }
-    // }
-
-    // pub async fn next(&mut self) -> Next<'_, Box<dyn Connection>>;
     pub fn split(self) -> (ConnectionWriter, ConnectionReader) {
         match self {
             Connection::DirectHost(stream) => {
@@ -189,6 +394,34 @@ impl Connection {
 
                 (conn_writer, conn_reader)
             }
+            Connection::SshHost(stream) => {
+                let (reader, writer) = tokio::io::split(stream);
+
+                let conn_writer = ConnectionWriter::SshHost(FramedWrite::new(
+                    writer,
+                    LengthDelimitedCodec::new(),
+                ));
+
+                let conn_reader =
+                    ConnectionReader::SshHost(FramedRead::new(reader, LengthDelimitedCodec::new()));
+
+                (conn_writer, conn_reader)
+            }
+            Connection::SshClient(stream) => {
+                let (reader, writer) = tokio::io::split(stream);
+
+                let conn_writer = ConnectionWriter::SshClient(FramedWrite::new(
+                    writer,
+                    LengthDelimitedCodec::new(),
+                ));
+
+                let conn_reader = ConnectionReader::SshClient(FramedRead::new(
+                    reader,
+                    LengthDelimitedCodec::new(),
+                ));
+
+                (conn_writer, conn_reader)
+            }
         }
     }
 }
@@ -196,44 +429,56 @@ impl Connection {
 impl ConnectionWriter {
     pub async fn send(&mut self, msg: Message) -> DynResult<()> {
         match self {
-            ConnectionWriter::DirectHost(stream) => stream.send(msg).await,
-            ConnectionWriter::DirectClient(stream) => stream.send(msg).await,
+            ConnectionWriter::DirectHost(stream) => stream.send(msg.try_into()?).await?,
+            ConnectionWriter::DirectClient(stream) => stream.send(msg.try_into()?).await?,
+            ConnectionWriter::SshHost(stream) => {
+                stream.send(Into::<Vec<u8>>::into(msg).into()).await?
+            }
+            ConnectionWriter::SshClient(stream) => {
+                stream.send(Into::<Vec<u8>>::into(msg).into()).await?
+            }
         }
-        .map_err(|e| e.into())
+
+        Ok(())
     }
 
     pub async fn close(&mut self) -> DynResult<()> {
         match self {
-            ConnectionWriter::DirectHost(stream) => stream.close().await,
-            ConnectionWriter::DirectClient(stream) => stream.close().await,
+            ConnectionWriter::DirectHost(stream) => stream.close().await?,
+            ConnectionWriter::DirectClient(stream) => stream.close().await?,
+            ConnectionWriter::SshHost(stream) => stream.close().await?,
+            ConnectionWriter::SshClient(stream) => stream.close().await?,
         }
-        .map_err(|e| e.into())
+
+        Ok(())
     }
 }
 
 impl ConnectionReader {
     pub async fn next(&mut self) -> Option<DynResult<Message>> {
         match self {
-            ConnectionReader::DirectHost(stream) => stream.next().await,
-            ConnectionReader::DirectClient(stream) => stream.next().await,
+            ConnectionReader::DirectHost(stream) => stream
+                .next()
+                .await
+                .map(|v| v.map(|v| v.into()).map_err(|e| e.into())),
+            ConnectionReader::DirectClient(stream) => stream
+                .next()
+                .await
+                .map(|v| v.map(|v| v.into()).map_err(|e| e.into())),
+            ConnectionReader::SshHost(channel) => channel.next().await.map(|v| {
+                v.map(|v| TryInto::<Message>::try_into(v.to_vec()))
+                    .map_err(|e| e.into())
+                    .flatten()
+            }),
+            ConnectionReader::SshClient(channel) => channel.next().await.map(|v| {
+                v.map(|v| v.to_vec().try_into())
+                    .map_err(|e| e.into())
+                    .flatten()
+            }),
         }
-        .map(|v| v.map_err(|e| e.into()))
     }
 }
 
-fn ip_from_octets(bytes: &[u8]) -> Option<IpAddr> {
-    match bytes.len() {
-        4 => {
-            let arr: [u8; 4] = bytes.try_into().ok()?;
-            Some(IpAddr::from(arr))
-        }
-        16 => {
-            let arr: [u8; 16] = bytes.try_into().ok()?;
-            Some(IpAddr::from(arr))
-        }
-        _ => None,
-    }
-}
 #[derive(Debug)]
 struct FingerprintVerifier {
     fingerprint: Vec<u8>,
@@ -331,5 +576,69 @@ impl ServerCertVerifier for FingerprintVerifier {
             SignatureScheme::RSA_PKCS1_SHA256,
             SignatureScheme::ECDSA_NISTP384_SHA384,
         ]
+    }
+}
+
+struct ServerFlow {
+    channel_tx: Option<oneshot::Sender<Channel<server::Msg>>>,
+    logger: Arc<Mutex<Logger>>,
+}
+
+struct ClientFlow {
+    connection_string: Vec<u8>,
+    expected_fingerprint_hex: String,
+}
+
+impl server::Handler for ServerFlow {
+    type Error = DynError;
+
+    async fn auth_none(&mut self, _user: &str) -> Result<russh::server::Auth, Self::Error> {
+        Ok(russh::server::Auth::Accept)
+    }
+
+    async fn auth_password(
+        &mut self,
+        _user: &str,
+        _password: &str,
+    ) -> Result<server::Auth, Self::Error> {
+        Ok(russh::server::Auth::reject())
+    }
+
+    async fn auth_publickey(
+        &mut self,
+        _user: &str,
+        _public_key: &russh::keys::PublicKey,
+    ) -> Result<russh::server::Auth, Self::Error> {
+        // your fingerprint check
+        Ok(russh::server::Auth::Accept)
+    }
+
+    async fn channel_open_session(
+        &mut self,
+        channel: Channel<server::Msg>,
+        _session: &mut server::Session,
+    ) -> Result<bool, Self::Error> {
+        self.logger.log("MMM accepting session creation").await?;
+
+        if let Some(tx) = self.channel_tx.take() {
+            let _ = tx.send(channel);
+        }
+
+        Ok(true)
+    }
+}
+
+impl client::Handler for ClientFlow {
+    type Error = DynError;
+
+    async fn check_server_key(
+        &mut self,
+        server_public_key: &ssh_key::PublicKey,
+    ) -> Result<bool, Self::Error> {
+        let inner = server_public_key.fingerprint(HashAlg::Sha256);
+        let computed = compute_fingerprint(inner.as_bytes(), self.connection_string.clone());
+        // compute_fingerprint returns a hex string; compare against the hex
+        // string form of the expected, OR keep both as bytes — just be consistent
+        Ok(computed == self.expected_fingerprint_hex)
     }
 }

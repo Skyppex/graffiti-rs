@@ -8,10 +8,9 @@ use tokio::sync::{
     mpsc::{Receiver, Sender},
     Mutex,
 };
-use tokio_tungstenite::tungstenite::Message;
 
 use crate::{
-    net::connection::{Connection, ConnectionMode},
+    net::connection::{Connection, ConnectionMode, Message},
     ppp,
     state::State,
     DynResult, Log, Logger,
@@ -23,15 +22,22 @@ pub async fn run_host(
     mut receiver: Receiver<receive::Message>,
     mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
-    let stream = Connection::host(ConnectionMode::Direct, async |fingerprint| {
-        logger
-            .log(&format!("Fingerprint: {}", &fingerprint))
-            .await?;
+    let stream = Connection::host(
+        ConnectionMode::Ssh,
+        async |fingerprint| {
+            logger
+                .clone()
+                .log(&format!("Fingerprint: {}", &fingerprint))
+                .await?;
 
-        sender.send(send::Message::Fingerprint(fingerprint)).await?;
-        Ok(())
-    })
+            sender.send(send::Message::Fingerprint(fingerprint)).await?;
+            Ok(())
+        },
+        logger.clone(),
+    )
     .await?;
+
+    logger.log("connection established").await?;
 
     let (mut writer, mut reader) = stream.split();
 
@@ -49,7 +55,7 @@ pub async fn run_host(
 
                 let msg = msg?;
 
-                if let Message::Close(_) = msg {
+                if let Message::Close = msg {
                     logger.log("Client disconnected").await?;
                     break;
                 }
@@ -62,7 +68,7 @@ pub async fn run_host(
 
                 if let receive::Message::Shutdown(id) = msg {
                     logger.log("Shutting down").await?;
-                    writer.send(Message::Close(None)).await?;
+                    writer.send(Message::Close).await?;
                     shutdown_id = Some(id);
                 } else {
                     receive::handle_message(msg, state.clone(), &mut writer, logger.clone()).await?;
@@ -87,7 +93,7 @@ pub async fn run_client(
     mut receiver: Receiver<receive::Message>,
     mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
-    let stream = Connection::connect(fingerprint).await?;
+    let stream = Connection::connect(fingerprint, logger.clone()).await?;
 
     let (mut writer, mut reader) = stream.split();
 
@@ -107,7 +113,7 @@ pub async fn run_client(
 
                 let msg = msg?;
 
-                if let Message::Close(_) = msg {
+                if let Message::Close = msg {
                     logger.log("Disconnected by server").await?;
                     break;
                 }
@@ -120,7 +126,7 @@ pub async fn run_client(
 
                 if let receive::Message::Shutdown(id) = msg {
                     logger.log("Shutting down").await?;
-                    writer.send(Message::Close(None)).await?;
+                    writer.send(Message::Close).await?;
                     shutdown_id = Some(id);
                 } else {
                     receive::handle_message(msg, state.clone(), &mut writer, logger.clone()).await?;
