@@ -3,6 +3,7 @@ use std::{fmt::Display, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 
 use crate::{
+    net::connection::ConnectionWriter,
     ppp::{self, AsyncStream, DocumentLocation},
     state::State,
     DynResult, Logger,
@@ -34,7 +35,7 @@ impl Display for Message {
 pub async fn handle_message<S: AsyncStream>(
     message: Message,
     state: Arc<Mutex<State>>,
-    writer: &mut WsWriter<S>,
+    writer: &mut ConnectionWriter,
     logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
     match message {

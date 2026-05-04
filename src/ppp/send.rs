@@ -6,6 +6,7 @@ use tokio_tungstenite::tungstenite::{Message, Utf8Bytes};
 
 use crate::{
     id::{next_client_id, next_request_id},
+    net::connection::ConnectionWriter,
     ppp::{HostInfo, InitializeResponse, Response},
     rpc,
     state::State,
@@ -20,7 +21,7 @@ use super::{
 
 pub async fn initialize<S: AsyncStream>(
     state: Arc<Mutex<State>>,
-    writer: &mut WsWriter<S>,
+    writer: &mut ConnectionWriter,
     mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
     logger.log("sending initialize to host").await?;
@@ -52,7 +53,7 @@ pub async fn initialize<S: AsyncStream>(
 pub async fn initialize_response<S: AsyncStream>(
     id: String,
     state: Arc<Mutex<State>>,
-    writer: &mut WsWriter<S>,
+    writer: &mut ConnectionWriter,
     mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
     let response = rpc::encode(Response::<InitializeResponse> {
@@ -92,7 +93,7 @@ pub async fn initialize_response<S: AsyncStream>(
 }
 
 pub async fn initialized<S: AsyncStream>(
-    writer: &mut WsWriter<S>,
+    writer: &mut ConnectionWriter,
     mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
     logger.log("sending initialized to host").await?;
@@ -112,7 +113,7 @@ pub async fn initialized<S: AsyncStream>(
 }
 
 pub async fn cursor_moved<S: AsyncStream>(
-    writer: &mut WsWriter<S>,
+    writer: &mut ConnectionWriter,
     client_id: String,
     location: DocumentLocation,
     mut logger: Arc<Mutex<Logger>>,
@@ -135,7 +136,7 @@ pub async fn cursor_moved<S: AsyncStream>(
 }
 
 pub async fn document_edit_full<S: AsyncStream>(
-    writer: &mut WsWriter<S>,
+    writer: &mut ConnectionWriter,
     client_id: String,
     uri: PathBuf,
     content: String,
@@ -161,7 +162,7 @@ pub async fn document_edit_full<S: AsyncStream>(
 }
 
 pub async fn directories_upload<S: AsyncStream>(
-    writer: &mut WsWriter<S>,
+    writer: &mut ConnectionWriter,
     client_id: String,
     directories: Vec<Directory>,
     mut logger: Arc<Mutex<Logger>>,
@@ -184,7 +185,7 @@ pub async fn directories_upload<S: AsyncStream>(
 }
 
 pub async fn initial_file_uri<S: AsyncStream>(
-    writer: &mut WsWriter<S>,
+    writer: &mut ConnectionWriter,
     uri: PathBuf,
     mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {

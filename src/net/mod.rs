@@ -1,3 +1,4 @@
+pub mod connection;
 pub mod receive;
 pub mod send;
 
@@ -26,7 +27,13 @@ use tokio_tungstenite::{
     Connector, WebSocketStream,
 };
 
-use crate::{id::next_client_id, ppp, state::State, DynResult, Log, Logger};
+use crate::{
+    id::next_client_id,
+    net::connection::{Connection, ConnectionMode},
+    ppp,
+    state::State,
+    DynResult, Log, Logger,
+};
 
 pub type WsWriter<S> = SplitSink<WebSocketStream<S>, Message>;
 
@@ -72,43 +79,17 @@ pub async fn run_host(
     mut receiver: Receiver<receive::Message>,
     mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
-    let public_ip = get_ip().await.unwrap_or_else(|_| "127.0.0.1".to_string());
-    let public_ip = IpAddr::from_str(&public_ip)?;
-    let cert_data = generate_cert(&public_ip);
-    let fingerprint = compute_fingerprint(&cert_data.certs[0], &public_ip);
-    logger.log(&format!("Fingerprint: {}", fingerprint)).await?;
+    let stream = Connection::host(ConnectionMode::Direct, async |fingerprint| {
+        logger
+            .log(&format!("Fingerprint: {}", &fingerprint))
+            .await?;
 
-    sender.send(send::Message::Fingerprint(fingerprint)).await?;
+        sender.send(send::Message::Fingerprint(fingerprint)).await?;
+        Ok(())
+    })
+    .await?;
 
-    let tls_config = ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(cert_data.certs, cert_data.key)?;
-
-    let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
-
-    let uri = "0.0.0.0:8080";
-    let listener = TcpListener::bind(uri).await?;
-    logger.log(&format!("Listening on {}", uri)).await?;
-
-    let (socket, addr) = listener.accept().await?;
-    logger
-        .log(&format!("Client connected from: {}", addr))
-        .await?;
-
-    let tls_stream = match tls_acceptor.accept(socket).await {
-        Ok(s) => s,
-        Err(e) => {
-            logger.log(&format!("TLS error: {:?}", e)).await?;
-            return Ok(());
-        }
-    };
-
-    logger.log("TLS connection established").await?;
-
-    let ws_stream = accept_async_with_config(tls_stream, None).await?;
-    logger.log("WebSocket connection established").await?;
-
-    let (mut writer, mut reader) = ws_stream.split();
+    let (mut writer, mut reader) = stream.split();
 
     let mut shutdown_id = None;
 
@@ -162,49 +143,9 @@ pub async fn run_client(
     mut receiver: Receiver<receive::Message>,
     mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
-    let public_ip = get_ip().await.unwrap_or_else(|_| "127.0.0.1".to_string());
-    let public_ip = IpAddr::from_str(&public_ip)?;
+    let stream = Connection::connect(fingerprint).await?;
 
-    let (fingerprint, server_ip) = {
-        let decoded = hex::decode(fingerprint)?;
-
-        let (fp, ip) = decoded.split_at(32);
-
-        (
-            fp.to_vec(),
-            ip_from_octets(ip).ok_or_else(|| "couldn't create ip from octets")?,
-        )
-    };
-
-    logger.log(&format!("server ip: {}", server_ip)).await?;
-
-    let connection_ip = if server_ip == public_ip {
-        "127.0.0.1".to_string()
-    } else {
-        match server_ip {
-            IpAddr::V4(v4) => v4.to_string(),
-            IpAddr::V6(v6) => format!("[{}]", v6),
-        }
-    };
-
-    let url = format!("wss://{}:8080", connection_ip).parse::<Uri>()?;
-    logger.log(&format!("Connecting to {}", url)).await?;
-
-    let verifier = FingerprintVerifier::new(fingerprint);
-
-    let tls_config = ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(verifier))
-        .with_no_client_auth();
-
-    let tls_connector = Connector::Rustls(Arc::new(tls_config));
-
-    let (ws_stream, _) =
-        connect_async_tls_with_config(url, None, false, Some(tls_connector)).await?;
-
-    logger.log("Connected with pinned certificate").await?;
-
-    let (mut writer, mut reader) = ws_stream.split();
+    let (mut writer, mut reader) = stream.split();
 
     ppp::send::initialize(state.clone(), &mut writer, logger.clone()).await?;
 
@@ -251,118 +192,4 @@ pub async fn run_client(
     logger.log("shutdown sent to main").await?;
 
     Ok(())
-}
-
-fn ip_from_octets(bytes: &[u8]) -> Option<IpAddr> {
-    match bytes.len() {
-        4 => {
-            let arr: [u8; 4] = bytes.try_into().ok()?;
-            Some(IpAddr::from(arr))
-        }
-        16 => {
-            let arr: [u8; 16] = bytes.try_into().ok()?;
-            Some(IpAddr::from(arr))
-        }
-        _ => None,
-    }
-}
-
-#[derive(Debug)]
-struct FingerprintVerifier {
-    fingerprint: Vec<u8>,
-}
-
-impl FingerprintVerifier {
-    pub fn new(fingerprint: Vec<u8>) -> Self {
-        Self { fingerprint }
-    }
-}
-
-impl ServerCertVerifier for FingerprintVerifier {
-    fn verify_server_cert(
-        &self,
-        end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        let mut hasher = Sha256::new();
-        hasher.update(end_entity.as_ref());
-        let fingerprint = hasher.finalize();
-
-        if fingerprint.as_slice() == self.fingerprint.as_slice() {
-            Ok(ServerCertVerified::assertion())
-        } else {
-            eprintln!("Fingerprint mismatch");
-            Err(rustls::Error::General("Fingerprint mismatch".into()))
-        }
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        // For development, we can accept all signatures
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-
-        // // Use webpki to verify the signature
-        // let cert_content = cert.as_ref();
-        // let alg = match dss.scheme {
-        //     rustls::SignatureScheme::RSA_PKCS1_SHA256 => &webpki::RSA_PKCS1_2048_8192_SHA256,
-        //     rustls::SignatureScheme::ECDSA_NISTP256_SHA256 => &webpki::ECDSA_P256_SHA256,
-        //     // Add other schemes you want to support
-        //     _ => return Err(rustls::Error::General("Unsupported signature scheme".into())),
-        // };
-        //
-        // match alg.verify(
-        //     untrusted::Input::from(cert_content),
-        //     untrusted::Input::from(message),
-        //     untrusted::Input::from(&dss.signature),
-        // ) {
-        //     Ok(()) => Ok(rustls::client::danger::HandshakeSignatureValid::assertion()),
-        //     Err(_) => Err(rustls::Error::General("Invalid signature".into())),
-        // }
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        // For development, we can accept all signatures
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-
-        // // TLS 1.3 uses different signature verification
-        // // Similar to TLS 1.2 but with TLS 1.3 specific algorithms
-        // let cert_content = cert.as_ref();
-        // let alg = match dss.scheme {
-        //     rustls::SignatureScheme::RSA_PSS_SHA256 => &webpki::RSA_PSS_2048_8192_SHA256,
-        //     rustls::SignatureScheme::ECDSA_NISTP384_SHA384 => &webpki::ECDSA_P384_SHA384,
-        //     // Add other TLS 1.3 schemes
-        //     _ => return Err(rustls::Error::General("Unsupported signature scheme".into())),
-        // };
-        //
-        // match alg.verify(
-        //     untrusted::Input::from(cert_content),
-        //     untrusted::Input::from(message),
-        //     untrusted::Input::from(&dss.signature),
-        // ) {
-        //     Ok(()) => Ok(rustls::client::danger::HandshakeSignatureValid::assertion()),
-        //     Err(_) => Err(rustls::Error::General("Invalid signature".into())),
-        // }
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        vec![
-            SignatureScheme::ED25519,
-            SignatureScheme::RSA_PSS_SHA256,
-            SignatureScheme::ECDSA_NISTP256_SHA256,
-            SignatureScheme::RSA_PKCS1_SHA256,
-            SignatureScheme::ECDSA_NISTP384_SHA384,
-        ]
-    }
 }

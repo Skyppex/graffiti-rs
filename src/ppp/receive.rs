@@ -9,7 +9,7 @@ use tokio_tungstenite::tungstenite::{Message, Utf8Bytes};
 
 use crate::{
     id::next_client_id,
-    net::send,
+    net::{connection::ConnectionWriter, send},
     ppp::{self, DirectoriesUploadNotification, Directory, DirectoryType},
     rpc,
     state::{self, State},
@@ -25,7 +25,7 @@ use super::{
 pub async fn handle_message<S: AsyncStream>(
     msg: Message,
     state: Arc<Mutex<State>>,
-    writer: &mut WsWriter<S>,
+    writer: &mut ConnectionWriter,
     sender: &Sender<send::Message>,
     mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
@@ -61,7 +61,7 @@ async fn handle_request<S: AsyncStream>(
     method: &str,
     _content: Vec<u8>,
     state: Arc<Mutex<State>>,
-    writer: &mut WsWriter<S>,
+    writer: &mut ConnectionWriter,
     mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
     if method == "initialize" {
@@ -80,7 +80,7 @@ async fn handle_response<S: AsyncStream>(
     content: Vec<u8>,
     state: Arc<Mutex<State>>,
     sender: &Sender<send::Message>,
-    writer: &mut WsWriter<S>,
+    writer: &mut ConnectionWriter,
     mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
     let mut state = state.lock().await;
@@ -133,7 +133,7 @@ async fn handle_notification<S: AsyncStream>(
     content: Vec<u8>,
     state: Arc<Mutex<State>>,
     sender: &Sender<send::Message>,
-    writer: &mut WsWriter<S>,
+    writer: &mut ConnectionWriter,
     mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
     match method {
