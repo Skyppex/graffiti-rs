@@ -23,7 +23,16 @@ pub struct Cli {
 #[derive(Debug, Clone, Subcommand)]
 pub enum Commands {
     /// Start as a host
-    Host,
+    Host {
+        /// Path to authorized_keys file for public key authentication
+        #[arg(long)]
+        authorized_keys: Option<PathBuf>,
+    },
     /// Connect to a host
-    Connect { sha: String },
+    Connect {
+        sha: String,
+        /// Path to client's private key for public key authentication
+        #[arg(long)]
+        client_key: Option<PathBuf>,
+    },
 }

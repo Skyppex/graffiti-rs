@@ -21,6 +21,7 @@ pub async fn run_host(
     sender: Sender<send::Message>,
     mut receiver: Receiver<receive::Message>,
     mut logger: Arc<Mutex<Logger>>,
+    authorized_keys_path: Option<std::path::PathBuf>,
 ) -> DynResult<()> {
     let stream = Connection::host(
         ConnectionMode::Ssh,
@@ -34,6 +35,7 @@ pub async fn run_host(
             Ok(())
         },
         logger.clone(),
+        authorized_keys_path,
     )
     .await?;
 
@@ -92,8 +94,9 @@ pub async fn run_client(
     sender: Sender<send::Message>,
     mut receiver: Receiver<receive::Message>,
     mut logger: Arc<Mutex<Logger>>,
+    client_key_path: Option<std::path::PathBuf>,
 ) -> DynResult<()> {
-    let stream = Connection::connect(fingerprint, logger.clone()).await?;
+    let stream = Connection::connect(fingerprint, logger.clone(), client_key_path).await?;
 
     let (mut writer, mut reader) = stream.split();
 

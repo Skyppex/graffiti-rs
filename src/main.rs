@@ -40,7 +40,7 @@ async fn main() -> DynResult<()> {
     let mut logger = Arc::new(Mutex::new(get_logger(&cli).await?));
     logger.log("Starting graffiti-rs").await?;
 
-    let is_host = matches!(cli.command, Commands::Host);
+    let is_host = matches!(cli.command, Commands::Host { .. });
 
     let (send_to_main, mut receive_from_thread) = mpsc::channel::<net::send::Message>(8);
     let (send_to_thread, receive_from_main) = mpsc::channel::<net::receive::Message>(8);
@@ -64,16 +64,17 @@ async fn main() -> DynResult<()> {
         .await?;
 
     let network_handle = match cli.command {
-        Commands::Host => {
+        Commands::Host { authorized_keys } => {
             logger.log("Starting host mode").await?;
             tokio::spawn(run_host(
                 state.clone(),
                 send_to_main,
                 receive_from_main,
                 logger.clone(),
+                authorized_keys,
             ))
         }
-        Commands::Connect { sha } => {
+        Commands::Connect { sha, client_key } => {
             logger.log("Starting client mode").await?;
             tokio::spawn(run_client(
                 sha,
@@ -81,6 +82,7 @@ async fn main() -> DynResult<()> {
                 send_to_main,
                 receive_from_main,
                 logger.clone(),
+                client_key,
             ))
         }
     };

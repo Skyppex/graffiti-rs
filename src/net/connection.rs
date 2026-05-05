@@ -8,7 +8,7 @@ use futures_util::{
 use rcgen::CertifiedKey;
 use russh::{
     client,
-    keys::{ssh_key, Algorithm, HashAlg, PrivateKey},
+    keys::{ssh_key, Algorithm, PrivateKey, PrivateKeyWithHashAlg},
     server, Channel, ChannelMsg, ChannelStream,
 };
 use rustls::{
@@ -154,17 +154,56 @@ fn generate_cert(public_ip: String) -> CertData {
     }
 }
 
-fn compute_fingerprint(data: &[u8], connection_string: Vec<u8>) -> String {
+fn compute_fingerprint(data: &[u8], connection_string: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
     let result = hasher.finalize();
 
     let result = result
         .into_iter()
-        .chain(connection_string)
+        .chain(connection_string.iter().copied())
         .collect::<Vec<u8>>();
 
     hex::encode(result)
+}
+
+fn compute_fingerprint_raw(data: &[u8], connection_string: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher.update(connection_string);
+    hex::encode(hasher.finalize())
+}
+
+fn compute_fingerprint_simple(data: &[u8]) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher.finalize().to_vec()
+}
+
+fn load_authorized_keys(path: &std::path::Path) -> DynResult<Vec<Vec<u8>>> {
+    let content = std::fs::read_to_string(path)?;
+    let mut fingerprints = Vec::new();
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let fingerprint = if line.starts_with("ssh-") {
+            let key = ssh_key::PublicKey::from_openssh(line)
+                .map_err(|e| format!("failed to parse public key: {}", e))?;
+            compute_fingerprint_simple(key.to_bytes()?.as_ref())
+        } else if line.len() == 64 && line.chars().all(|c| c.is_ascii_hexdigit()) {
+            hex::decode(line)?
+        } else {
+            continue;
+        };
+
+        fingerprints.push(fingerprint);
+    }
+
+    Ok(fingerprints)
 }
 
 impl Connection {
@@ -172,11 +211,17 @@ impl Connection {
         mode: ConnectionMode,
         fingerprint_generated: F,
         mut logger: Arc<Mutex<Logger>>,
+        authorized_keys_path: Option<std::path::PathBuf>,
     ) -> DynResult<Self>
     where
         F: FnOnce(String) -> Fut,
         Fut: Future<Output = DynResult<()>>,
     {
+        let authorized_keys = if let Some(path) = authorized_keys_path {
+            load_authorized_keys(&path).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         match mode {
             ConnectionMode::Direct => {
                 let ip = get_ip().await.unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -189,7 +234,7 @@ impl Connection {
                 };
 
                 let connection_string = [b"ws://".to_vec(), octets].concat();
-                let fingerprint = compute_fingerprint(&cert_data.certs[0], connection_string);
+                let fingerprint = compute_fingerprint(&cert_data.certs[0], &connection_string);
 
                 fingerprint_generated(fingerprint.clone()).await?;
 
@@ -221,12 +266,9 @@ impl Connection {
 
                 let connection_string = [b"ssh://".to_vec(), host.as_bytes().to_vec()].concat();
 
-                let fingerprint = compute_fingerprint(
-                    host_key
-                        .public_key()
-                        .fingerprint(HashAlg::Sha256)
-                        .as_bytes(),
-                    connection_string,
+                let fingerprint = compute_fingerprint_raw(
+                    host_key.public_key().to_bytes()?.as_ref(),
+                    &connection_string,
                 );
 
                 fingerprint_generated(fingerprint.to_string()).await?;
@@ -246,6 +288,7 @@ impl Connection {
                 let ssh_handler = ServerFlow {
                     channel_tx: Some(channel_tx),
                     logger: logger.clone(),
+                    authorized_keys,
                 };
 
                 logger
@@ -274,7 +317,15 @@ impl Connection {
     pub async fn connect(
         fingerprint_from_out_of_band: String,
         mut logger: Arc<Mutex<Logger>>,
+        client_key_path: Option<std::path::PathBuf>,
     ) -> DynResult<Self> {
+        let client_key = if let Some(path) = client_key_path {
+            let content = tokio::fs::read_to_string(&path).await?;
+            Some(PrivateKey::from_openssh(&content)?)
+        } else {
+            None
+        };
+
         let ip = get_ip().await.unwrap_or_else(|_| "127.0.0.1".to_string());
 
         let (fingerprint, connection_string, connection_mode) = {
@@ -359,7 +410,12 @@ impl Connection {
                     .log(&format!("ssh session created on {}", address))
                     .await?;
 
-                let auth_result = session.authenticate_none("peer").await?;
+                let auth_result = if let Some(ref key) = client_key {
+                    let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(key.clone()), None);
+                    session.authenticate_publickey("peer", key_with_hash).await?
+                } else {
+                    session.authenticate_none("peer").await?
+                };
 
                 if !auth_result.success() {
                     return Err("failed to authenticate over ssh".into());
@@ -582,6 +638,7 @@ impl ServerCertVerifier for FingerprintVerifier {
 struct ServerFlow {
     channel_tx: Option<oneshot::Sender<Channel<server::Msg>>>,
     logger: Arc<Mutex<Logger>>,
+    authorized_keys: Vec<Vec<u8>>,
 }
 
 struct ClientFlow {
@@ -607,10 +664,20 @@ impl server::Handler for ServerFlow {
     async fn auth_publickey(
         &mut self,
         _user: &str,
-        _public_key: &russh::keys::PublicKey,
+        public_key: &russh::keys::PublicKey,
     ) -> Result<russh::server::Auth, Self::Error> {
-        // your fingerprint check
-        Ok(russh::server::Auth::Accept)
+        if self.authorized_keys.is_empty() {
+            return Ok(russh::server::Auth::Accept);
+        }
+
+        let key_bytes = public_key.to_bytes().map_err(|e| e.to_string())?;
+        let key_fingerprint = compute_fingerprint_simple(key_bytes.as_ref());
+
+        if self.authorized_keys.iter().any(|f| f == &key_fingerprint) {
+            Ok(russh::server::Auth::Accept)
+        } else {
+            Ok(russh::server::Auth::reject())
+        }
     }
 
     async fn channel_open_session(
@@ -635,10 +702,10 @@ impl client::Handler for ClientFlow {
         &mut self,
         server_public_key: &ssh_key::PublicKey,
     ) -> Result<bool, Self::Error> {
-        let inner = server_public_key.fingerprint(HashAlg::Sha256);
-        let computed = compute_fingerprint(inner.as_bytes(), self.connection_string.clone());
-        // compute_fingerprint returns a hex string; compare against the hex
-        // string form of the expected, OR keep both as bytes — just be consistent
+        let computed = compute_fingerprint_raw(
+            server_public_key.to_bytes()?.as_ref(),
+            &self.connection_string,
+        );
         Ok(computed == self.expected_fingerprint_hex)
     }
 }
