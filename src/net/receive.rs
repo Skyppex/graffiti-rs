@@ -6,7 +6,7 @@ use crate::{
     net::connection::ConnectionWriter,
     ppp::{self, DocumentLocation},
     state::State,
-    DynResult, Logger,
+    DynResult,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -34,7 +34,6 @@ pub async fn handle_message(
     message: Message,
     state: Arc<Mutex<State>>,
     writer: &mut ConnectionWriter,
-    logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
     match message {
         Message::Shutdown(id) => {
@@ -45,13 +44,7 @@ pub async fn handle_message(
                 return Ok(());
             }
 
-            ppp::send::cursor_moved(
-                writer,
-                state.lock().await.client_id.clone(),
-                location,
-                logger,
-            )
-            .await
+            ppp::send::cursor_moved(writer, state.lock().await.client_id.clone(), location).await
         }
         Message::DocumentEditFull { uri, content } => {
             if !uri.exists() {
@@ -63,7 +56,6 @@ pub async fn handle_message(
                 state.lock().await.client_id.clone(),
                 uri,
                 content,
-                logger,
             )
             .await
         }

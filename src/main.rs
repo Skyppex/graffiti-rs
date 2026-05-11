@@ -1,6 +1,7 @@
 mod cli;
 mod csp;
 mod id;
+mod log;
 mod net;
 mod path_utils;
 mod ppp;
@@ -9,7 +10,6 @@ mod state;
 
 use std::{error::Error, process, sync::Arc};
 
-use chrono::Local;
 use csp::{
     FingerprintGeneratedNotification, InitializeOptions, InitializeResponse, LocationRequest,
     Notification, Request, Response, ShutdownRequest, ShutdownResponse,
@@ -28,7 +28,7 @@ use tokio::{
     },
 };
 
-use crate::{id::next_request_id, net::send::Message};
+use crate::{id::next_request_id, log::Logger, net::send::Message};
 
 type DynError = Box<dyn Error + Send + Sync>;
 type DynResult<T> = Result<T, DynError>;
@@ -37,8 +37,7 @@ type DynResult<T> = Result<T, DynError>;
 async fn main() -> DynResult<()> {
     let cli = Cli::parse();
 
-    let mut logger = Arc::new(Mutex::new(get_logger(&cli).await?));
-    logger.log("Starting graffiti-rs").await?;
+    Logger::log("Starting graffiti-rs");
 
     let is_host = matches!(cli.command, Commands::Host { .. });
 
@@ -47,41 +46,33 @@ async fn main() -> DynResult<()> {
 
     let cwd = std::env::current_dir()?;
 
-    logger
-        .log(format!("Current working directory: {:?}", cwd).as_str())
-        .await?;
+    Logger::log(&format!("Current working directory: {:?}", cwd));
 
     let next_client_id = next_client_id();
 
-    logger
-        .log(&format!("next_client_id = {}", next_client_id))
-        .await?;
+    Logger::log(&format!("next_client_id = {}", next_client_id));
 
     let state = State::new(cwd, cli.graffitiignore, is_host, next_client_id);
 
-    logger
-        .log(&format!("my client id is {}", state.lock().await.client_id))
-        .await?;
+    Logger::log(&format!("my client id is {}", state.lock().await.client_id));
 
     let network_handle = match cli.command {
         Commands::Host { authorized_keys } => {
-            logger.log("Starting host mode").await?;
+            Logger::log("Starting host mode");
             tokio::spawn(run_host(
                 state.clone(),
                 send_to_main,
                 receive_from_main,
-                logger.clone(),
                 authorized_keys,
             ))
         }
         Commands::Connect { sha, client_key } => {
-            logger.log("Starting client mode").await?;
+            Logger::log("Starting client mode");
             tokio::spawn(run_client(
                 sha,
                 state.clone(),
                 send_to_main,
                 receive_from_main,
-                logger.clone(),
                 client_key,
             ))
         }
@@ -92,18 +83,15 @@ async fn main() -> DynResult<()> {
 
     let mut writer = io::stdout();
 
-    logger.log("Entering main message loop").await?;
+    Logger::log("Entering main message loop");
 
     let mut shutting_down = false;
 
     loop {
         tokio::select! {
             // Handle messages from the network thread
-            Some(message) = {
-                logger.log("Waiting for message from network").await?;
-                receive_from_thread.recv()
-            } => {
-                let result = handle_network_message(message, &mut writer, state.clone(), logger.clone()).await?;
+            Some(message) = receive_from_thread.recv() => {
+                let result = handle_network_message(message, &mut writer, state.clone()).await?;
 
                 if result.should_shutdown {
                     shutting_down = true;
@@ -113,40 +101,32 @@ async fn main() -> DynResult<()> {
             // Handle stdin
             Ok(HandledMessage {
                 should_exit,
-            }) = {
-                logger.log("Waiting for input from editor").await?;
-                handle_input(&mut scanner, &mut writer, &send_to_thread, state.clone(), logger.clone())
-            } => {
-                logger.log("Handled input").await?;
-
+            }) = handle_input(&mut scanner, &mut writer, &send_to_thread, state.clone()) => {
                 if should_exit {
                     break;
                 }
             }
 
             else => {
-                // Just restart the loop so we stay responsive to new messages
-                continue; // continue to avoid log
+                continue;
             }
         }
 
-        logger.log("Finished select iteration").await?;
+        Logger::log("Finished select iteration");
     }
 
     match network_handle.await? {
         Ok(_) => {}
         Err(e) => {
-            logger
-                .log(&format!("Network thread exited with error: {}", e))
-                .await?;
+            Logger::log(&format!("Network thread exited with error: {}", e));
         }
     }
 
     if !shutting_down {
-        logger.log("Exiting without shutdown message").await?;
+        Logger::log("Exiting without shutdown message");
         process::exit(1);
     } else {
-        logger.log("Exiting").await?;
+        Logger::log("Exiting");
         process::exit(0);
     }
 }
@@ -156,18 +136,16 @@ async fn handle_input(
     writer: &mut (impl AsyncWrite + Unpin),
     sender: &Sender<net::receive::Message>,
     state: Arc<Mutex<State>>,
-    mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<HandledMessage> {
-    logger.log("Handling input from editor").await?;
+    Logger::log("Handling input from editor");
     let decoded = rpc::decode(scanner).await?;
 
-    logger
-        .log(format!("Handling editor method: {}", decoded.method).as_str())
-        .await?;
+    Logger::log(&format!("Handling editor method: {}", decoded.method));
 
-    logger
-        .log(format!("Content: {:?}", String::from_utf8(decoded.content.clone())).as_str())
-        .await?;
+    Logger::log(&format!(
+        "Content: {:?}",
+        String::from_utf8(decoded.content.clone())
+    ));
 
     handle_message(
         decoded.id,
@@ -176,7 +154,6 @@ async fn handle_input(
         writer,
         sender,
         state,
-        logger,
     )
     .await
 }
@@ -188,7 +165,6 @@ async fn handle_message(
     writer: &mut (impl AsyncWrite + Unpin),
     sender: &Sender<net::receive::Message>,
     state: Arc<Mutex<State>>,
-    mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<HandledMessage> {
     match method {
         "initialize" => {
@@ -205,9 +181,7 @@ async fn handle_message(
                 }
             }
 
-            logger
-                .log("Received initialize message from editor")
-                .await?;
+            Logger::log("Received initialize message from editor");
 
             let response = rpc::encode(Response::<InitializeResponse> {
                 id: id.expect("Request ID is missing"),
@@ -225,9 +199,7 @@ async fn handle_message(
             Ok(HandledMessage { should_exit: false })
         }
         "move_cursor" => {
-            logger
-                .log("Received move_cursor message from editor")
-                .await?;
+            Logger::log("Received move_cursor message from editor");
 
             let params = rpc::decode_params::<csp::MoveCursorNotification>(content)?;
 
@@ -246,9 +218,7 @@ async fn handle_message(
             Ok(HandledMessage { should_exit: false })
         }
         "document/edit" => {
-            logger
-                .log("Received document/edit message from editor")
-                .await?;
+            Logger::log("Received document/edit message from editor");
 
             let request = rpc::decode_params::<csp::DocumentEditModeNotification>(content)?;
 
@@ -275,7 +245,7 @@ async fn handle_message(
                             })
                             .await?;
                     } else {
-                        logger.log("153 File doesn't exist").await?;
+                        Logger::log("153 File doesn't exist");
                     }
                 }
                 csp::DocumentEditMode::Incremental => {
@@ -286,9 +256,7 @@ async fn handle_message(
             Ok(HandledMessage { should_exit: false })
         }
         "initialized" => {
-            logger
-                .log("Received initialized message from editor")
-                .await?;
+            Logger::log("Received initialized message from editor");
 
             let request = rpc::encode(Request::<LocationRequest> {
                 id: Some(next_request_id()),
@@ -301,28 +269,22 @@ async fn handle_message(
             Ok(HandledMessage { should_exit: false })
         }
         "document/location" => {
-            logger
-                .log("Received document/location message from editor")
-                .await?;
+            Logger::log("Received document/location message from editor");
 
             let params = rpc::decode_params::<csp::LocationResponse>(content)?;
-            logger.log(&format!("50 {:?}", params)).await?;
+            Logger::log(&format!("50 {:?}", params));
 
             state.lock().await.set_my_location(params.location);
 
             Ok(HandledMessage { should_exit: false })
         }
         "cwd_changed" => {
-            logger
-                .log("Received cwd_changed message from editor")
-                .await?;
+            Logger::log("Received cwd_changed message from editor");
 
             Ok(HandledMessage { should_exit: false })
         }
         "request_fingerprint" => {
-            logger
-                .log("Received fingerprint message from editor")
-                .await?;
+            Logger::log("Received fingerprint message from editor");
 
             let response = rpc::encode(Response::<csp::FingerprintResponse> {
                 id: id.expect("Request ID is missing"),
@@ -341,7 +303,7 @@ async fn handle_message(
             Ok(HandledMessage { should_exit: false })
         }
         "shutdown" => {
-            logger.log("Received shutdown message from editor").await?;
+            Logger::log("Received shutdown message from editor");
 
             sender
                 .send(net::receive::Message::Shutdown(
@@ -349,16 +311,16 @@ async fn handle_message(
                 ))
                 .await?;
 
-            logger.log("Sent shutdown message through channel").await?;
+            Logger::log("Sent shutdown message through channel");
 
             Ok(HandledMessage { should_exit: false })
         }
         "exit" => {
-            logger.log("Received shutdown message from editor").await?;
+            Logger::log("Received shutdown message from editor");
             Ok(HandledMessage { should_exit: true })
         }
         _ => {
-            logger.log("Received unknown message from editor").await?;
+            Logger::log("Received unknown message from editor");
             let response = rpc::encode("unknown method").unwrap();
             writer.write_all(&response).await.unwrap();
             writer.flush().await.unwrap();
@@ -372,21 +334,16 @@ async fn handle_network_message(
     message: Message,
     writer: &mut (impl AsyncWrite + Unpin),
     state: Arc<Mutex<State>>,
-    mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<HandledNetworkMessage> {
-    logger
-        .log(&format!("Received from network: {}", message))
-        .await?;
+    Logger::log(&format!("Received from network: {}", message));
 
-    // Handle the message here
-    // You might want to send responses back using send_thread
     match message {
         net::send::Message::Shutdown(Some(id)) => {
             let response = rpc::encode(Response::<ShutdownResponse> { id, result: None })?;
 
-            logger.log("Sending shutdown response to editor").await?;
+            Logger::log("Sending shutdown response to editor");
             writer.write_all(&response).await?;
-            logger.log("Sent shutdown response to editor").await?;
+            Logger::log("Sent shutdown response to editor");
 
             Ok(HandledNetworkMessage {
                 should_shutdown: true,
@@ -399,9 +356,9 @@ async fn handle_network_message(
                 params: None,
             })?;
 
-            logger.log("Sending shutdown request to editor").await?;
+            Logger::log("Sending shutdown request to editor");
             writer.write_all(&request).await?;
-            logger.log("Sent shutdown request to editor").await?;
+            Logger::log("Sent shutdown request to editor");
 
             Ok(HandledNetworkMessage {
                 should_shutdown: true,
@@ -422,13 +379,11 @@ async fn handle_network_message(
             })
         }
         net::send::Message::InitialFileUri { uri } => {
-            logger
-                .log(&format!(
-                    "200 Received initial file URI: {:?} CWD: {:?}",
-                    uri,
-                    state.lock().await.get_cwd()
-                ))
-                .await?;
+            Logger::log(&format!(
+                "200 Received initial file URI: {:?} CWD: {:?}",
+                uri,
+                state.lock().await.get_cwd()
+            ));
 
             let request = rpc::encode(Request::<csp::InitialFileUriRequest> {
                 id: Some(next_request_id()),
@@ -449,12 +404,10 @@ async fn handle_network_message(
             let state = state.lock().await;
 
             if state.is_client() {
-                logger
-                    .log(&format!(
-                        "client initialized received on client: {}",
-                        client_id
-                    ))
-                    .await?;
+                Logger::log(&format!(
+                    "client initialized received on client: {}",
+                    client_id
+                ));
             }
 
             Ok(HandledNetworkMessage {
@@ -465,9 +418,7 @@ async fn handle_network_message(
             let state = state.lock().await;
 
             if state.is_client() {
-                logger
-                    .log(&format!("initialized received on client: {}", client_id))
-                    .await?;
+                Logger::log(&format!("initialized received on client: {}", client_id));
 
                 let notification = rpc::encode(Notification::<csp::ClientIdChangedNotification> {
                     method: "client_id_changed".into(),
@@ -527,64 +478,6 @@ async fn handle_network_message(
     }
 }
 
-async fn get_logger(cli: &Cli) -> DynResult<Logger> {
-    if cli.log_to_stderr {
-        return Ok(Logger::new(Box::new(io::stderr())));
-    }
-
-    if let Some(log_file) = &cli.log_file {
-        let file = tokio::fs::File::create(log_file).await?;
-        return Ok(Logger::new(Box::new(file)));
-    }
-
-    Ok(Logger::empty())
-}
-
-pub trait Log {
-    fn log(&mut self, message: &str) -> impl std::future::Future<Output = DynResult<()>>;
-}
-
-pub struct Logger {
-    writer: Option<Box<dyn AsyncWrite + Unpin + Send>>,
-}
-
-impl Logger {
-    fn empty() -> Logger {
-        Logger { writer: None }
-    }
-
-    fn new(writer: Box<dyn AsyncWrite + Unpin + Send>) -> Logger {
-        Logger {
-            writer: Some(writer),
-        }
-    }
-}
-
-impl Log for Logger {
-    async fn log(&mut self, message: &str) -> DynResult<()> {
-        if let Some(ref mut writer) = self.writer {
-            writer
-                .write_all(
-                    format!(
-                        "[{}] {}\n",
-                        Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
-                        message
-                    )
-                    .as_bytes(),
-                )
-                .await?;
-        }
-
-        Ok(())
-    }
-}
-
-impl Log for Arc<Mutex<Logger>> {
-    async fn log(&mut self, message: &str) -> DynResult<()> {
-        self.lock().await.log(message).await
-    }
-}
-
 pub struct HandledMessage {
     should_exit: bool,
 }
@@ -602,7 +495,7 @@ mod tests {
 
     use crate::{
         csp::{InitializeRequest, InitializeResponse, Request, Response},
-        rpc, Logger,
+        rpc,
     };
 
     async fn test_message(message: Vec<u8>) -> Vec<u8> {
@@ -615,7 +508,6 @@ mod tests {
 
         let mut writer = Vec::new();
         let (sender, _) = mpsc::channel(8);
-        let logger = Arc::new(Mutex::new(Logger::empty()));
 
         handle_message(
             id,
@@ -624,7 +516,6 @@ mod tests {
             &mut writer,
             &sender,
             State::new(PathBuf::new(), None, true, next_client_id()),
-            logger,
         )
         .await
         .unwrap();

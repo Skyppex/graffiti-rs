@@ -14,7 +14,7 @@ use crate::{
     ppp::{self, DirectoriesUploadNotification, Directory, DirectoryType},
     rpc,
     state::{self, State},
-    DynResult, Log, Logger,
+    DynResult, Logger,
 };
 
 use super::{
@@ -27,32 +27,31 @@ pub async fn handle_message(
     state: Arc<Mutex<State>>,
     writer: &mut ConnectionWriter,
     sender: &Sender<send::Message>,
-    mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
     if let Message::Data(data) = msg {
-        logger.log("Received network message").await?;
-        logger.log(&format!("data: {:?}", &data)).await?;
+        Logger::log("Received network message");
+        Logger::log(&format!("data: {:?}", &data));
 
         let decoded = rpc::decode_message(&data).await;
 
-        logger.log(&format!("{:?}", decoded)).await?;
+        Logger::log(&format!("{:?}", decoded));
 
         let decoded = decoded?;
 
         let id = decoded.id;
         let method = decoded.method;
 
-        logger.log(&format!("Method: {:?}", method)).await?;
+        Logger::log(&format!("Method: {:?}", method));
 
         match (id, method) {
             (Some(id), Some(method)) => {
-                handle_request(id, &method, decoded.content, state, writer, logger).await?
+                handle_request(id, &method, decoded.content, state, writer).await?
             }
             (Some(id), None) => {
-                handle_response(id, decoded.content, state, sender, writer, logger).await?
+                handle_response(id, decoded.content, state, sender, writer).await?
             }
             (None, Some(method)) => {
-                handle_notification(&method, decoded.content, state, sender, writer, logger).await?
+                handle_notification(&method, decoded.content, state, sender, writer).await?
             }
             _ => Err("Id and/or method is required for a message")?,
         }
@@ -67,14 +66,11 @@ async fn handle_request(
     _content: Vec<u8>,
     state: Arc<Mutex<State>>,
     writer: &mut ConnectionWriter,
-    mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
     if method == "initialize" {
-        logger
-            .log("received initialize request from client")
-            .await?;
+        Logger::log("received initialize request from client");
 
-        ppp::send::initialize_response(id, state, writer, logger).await?;
+        ppp::send::initialize_response(id, state, writer).await?;
     }
 
     Ok(())
@@ -86,41 +82,34 @@ async fn handle_response(
     state: Arc<Mutex<State>>,
     sender: &Sender<send::Message>,
     writer: &mut ConnectionWriter,
-    mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
     let mut state = state.lock().await;
 
     if let Some(request) = state.remove_net_req(&id) {
-        logger
-            .log(format!("request-method: {}", request.method().as_str()).as_str())
-            .await?;
+        Logger::log(format!("request-method: {}", request.method().as_str()).as_str());
 
         match request.method().as_str() {
             "initialize" => {
-                logger.log("Received initialize response from host").await?;
+                Logger::log("Received initialize response from host");
                 let result = rpc::decode_result::<InitializeResponse>(&content)?;
                 let new_cwd = state.get_cwd_from_remote_projects_path(&result.project_dir_name);
 
-                logger
-                    .log(&format!(
-                        "moving to directory: {}",
-                        new_cwd.to_string_lossy()
-                    ))
-                    .await?;
+                Logger::log(&format!(
+                    "moving to directory: {}",
+                    new_cwd.to_string_lossy()
+                ));
 
                 tokio::fs::create_dir_all(&new_cwd).await?;
                 state.set_cwd(new_cwd);
                 state.set_client_id(result.client_id);
 
-                logger
-                    .log(&format!("my client id is {}", state.client_id))
-                    .await?;
+                Logger::log(&format!("my client id is {}", state.client_id));
 
                 tokio::try_join!(
                     sender
                         .send(send::Message::Initialized(state.client_id.clone()))
                         .map_err(|e| e.into()),
-                    ppp::send::initialized(writer, logger)
+                    ppp::send::initialized(writer)
                 )?;
             }
             other => Err(format!("unknown method: {}", other))?,
@@ -136,13 +125,10 @@ async fn handle_notification(
     state: Arc<Mutex<State>>,
     sender: &Sender<send::Message>,
     writer: &mut ConnectionWriter,
-    mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
     match method {
         "initialized" => {
-            logger
-                .log("received initialized notification from client")
-                .await?;
+            Logger::log("received initialized notification from client");
             let params = rpc::decode_params::<InitializedNotification>(&content)?;
 
             sender
@@ -197,7 +183,7 @@ async fn handle_notification(
                     .take(PAGE_SIZE)
                     .collect::<Vec<_>>();
 
-                logger.log(&format!("sending batch: {}", page)).await?;
+                Logger::log(&format!("sending batch: {}", page));
 
                 page += 1;
 
@@ -225,7 +211,6 @@ async fn handle_notification(
                     writer,
                     params.client_id.clone(),
                     directories,
-                    logger.clone(),
                 )
                 .await?;
             }
@@ -234,19 +219,15 @@ async fn handle_notification(
             let location = state.get_my_location();
 
             if let Some(state::DocumentLocation { uri, .. }) = location {
-                logger
-                    .log(&format!("100 Sending initial file URI: {:?}", uri))
-                    .await?;
+                Logger::log(&format!("100 Sending initial file URI: {:?}", uri));
 
-                ppp::send::initial_file_uri(writer, uri.clone(), logger).await?;
+                ppp::send::initial_file_uri(writer, uri.clone()).await?;
             } else {
-                logger.log("No initial file URI found").await?;
+                Logger::log("No initial file URI found");
             }
         }
         "directories/upload" => {
-            logger
-                .log("Received directories/upload notification")
-                .await?;
+            Logger::log("Received directories/upload notification");
 
             let params = rpc::decode_params::<DirectoriesUploadNotification>(&content)?;
 
@@ -273,7 +254,7 @@ async fn handle_notification(
             }
         }
         "initial_file_uri" => {
-            logger.log("Received initial_file_uri notification").await?;
+            Logger::log("Received initial_file_uri notification");
             let params = rpc::decode_params::<InitialFileNotification>(&content)?;
 
             sender
@@ -296,7 +277,7 @@ async fn handle_notification(
                 .await?;
         }
         "document/edit" => {
-            logger.log("Received document/edit notification").await?;
+            Logger::log("Received document/edit notification");
             let params = rpc::decode_params::<DocumentEditModeNotification>(&content)?;
 
             match params.mode {
@@ -306,7 +287,7 @@ async fn handle_notification(
                     let uri = params.uri;
                     let content = params.content;
 
-                    logger.log(&format!("uri: {:?}", uri)).await?;
+                    Logger::log(&format!("uri: {:?}", uri));
 
                     let mut state = state.lock().await;
 

@@ -8,7 +8,7 @@ use crate::{
     ppp::{HostInfo, InitializeResponse, Response},
     rpc,
     state::State,
-    DynResult, Log, Logger,
+    DynResult, Logger,
 };
 
 use super::{
@@ -17,12 +17,8 @@ use super::{
     InitializeRequest, InitializedNotification, Notification, Request,
 };
 
-pub async fn initialize(
-    state: Arc<Mutex<State>>,
-    writer: &mut ConnectionWriter,
-    mut logger: Arc<Mutex<Logger>>,
-) -> DynResult<()> {
-    logger.log("sending initialize to host").await?;
+pub async fn initialize(state: Arc<Mutex<State>>, writer: &mut ConnectionWriter) -> DynResult<()> {
+    Logger::log("sending initialize to host");
 
     let request = Request::<InitializeRequest> {
         id: next_request_id(),
@@ -50,7 +46,6 @@ pub async fn initialize_response(
     id: String,
     state: Arc<Mutex<State>>,
     writer: &mut ConnectionWriter,
-    mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
     let response = rpc::encode(Response::<InitializeResponse> {
         id,
@@ -71,26 +66,21 @@ pub async fn initialize_response(
         }),
     })?;
 
-    logger.log("sending initialize response to client").await?;
-    logger
-        .log(&format!(
-            "response: {}",
-            String::from_utf8(response.clone()).unwrap()
-        ))
-        .await?;
+    Logger::log("sending initialize response to client");
+    Logger::log(&format!(
+        "response: {}",
+        String::from_utf8(response.clone()).unwrap()
+    ));
 
     writer.send(Message::Data(response)).await?;
 
-    logger.log("sent initialize response to client").await?;
+    Logger::log("sent initialize response to client");
 
     Ok(())
 }
 
-pub async fn initialized(
-    writer: &mut ConnectionWriter,
-    mut logger: Arc<Mutex<Logger>>,
-) -> DynResult<()> {
-    logger.log("sending initialized to host").await?;
+pub async fn initialized(writer: &mut ConnectionWriter) -> DynResult<()> {
+    Logger::log("sending initialized to host");
 
     let request = rpc::encode(Notification::<InitializedNotification> {
         method: "initialized".into(),
@@ -108,9 +98,8 @@ pub async fn cursor_moved(
     writer: &mut ConnectionWriter,
     client_id: String,
     location: DocumentLocation,
-    mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
-    logger.log("sending cursor_moved").await?;
+    Logger::log("sending cursor_moved");
 
     let request = rpc::encode(Notification::<CursorMovedNotification> {
         method: "cursor_moved".into(),
@@ -130,9 +119,8 @@ pub async fn document_edit_full(
     client_id: String,
     uri: PathBuf,
     content: String,
-    mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
-    logger.log("sending document_edit_full").await?;
+    Logger::log("sending document_edit_full");
 
     let notification = rpc::encode(Notification::<DocumentEditFullNotification> {
         method: "document/edit".into(),
@@ -153,9 +141,8 @@ pub async fn directories_upload(
     writer: &mut ConnectionWriter,
     client_id: String,
     directories: Vec<Directory>,
-    mut logger: Arc<Mutex<Logger>>,
 ) -> DynResult<()> {
-    logger.log("sending directories/upload").await?;
+    Logger::log("sending directories/upload");
 
     let notification = rpc::encode(Notification::<DirectoriesUploadNotification> {
         method: "directories/upload".into(),
@@ -170,12 +157,8 @@ pub async fn directories_upload(
     Ok(())
 }
 
-pub async fn initial_file_uri(
-    writer: &mut ConnectionWriter,
-    uri: PathBuf,
-    mut logger: Arc<Mutex<Logger>>,
-) -> DynResult<()> {
-    logger.log("sending initial_file_uri").await?;
+pub async fn initial_file_uri(writer: &mut ConnectionWriter, uri: PathBuf) -> DynResult<()> {
+    Logger::log("sending initial_file_uri");
 
     let notification = rpc::encode(Notification::<InitialFileNotification> {
         method: "initial_file_uri".into(),

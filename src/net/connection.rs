@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use tokio::{
     io::{ReadHalf, WriteHalf},
     net::{TcpListener, TcpStream},
-    sync::{oneshot, Mutex},
+    sync::oneshot,
 };
 use tokio_rustls::{server::TlsStream, TlsAcceptor};
 use tokio_tungstenite::{
@@ -30,7 +30,7 @@ use tokio_tungstenite::{
 };
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
-use crate::{DynError, DynResult, Log, Logger};
+use crate::{DynError, DynResult, Logger};
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -210,7 +210,6 @@ impl Connection {
     pub async fn host<F, Fut>(
         mode: ConnectionMode,
         fingerprint_generated: F,
-        mut logger: Arc<Mutex<Logger>>,
         authorized_keys_path: Option<std::path::PathBuf>,
     ) -> DynResult<Self>
     where
@@ -246,7 +245,7 @@ impl Connection {
 
                 let uri = "0.0.0.0:32700";
                 let listener = TcpListener::bind(uri).await?;
-                logger.log(&format!("Listening on {}", uri)).await?;
+                Logger::log(&format!("Listening on {}", uri));
 
                 let (socket, _) = listener.accept().await?;
 
@@ -275,7 +274,7 @@ impl Connection {
 
                 let uri = "0.0.0.0:32700";
                 let listener = TcpListener::bind(uri).await?;
-                logger.log(&format!("Listening on {}", uri)).await?;
+                Logger::log(&format!("Listening on {}", uri));
 
                 let (socket, _) = listener.accept().await?;
 
@@ -287,13 +286,10 @@ impl Connection {
 
                 let ssh_handler = ServerFlow {
                     channel_tx: Some(channel_tx),
-                    logger: logger.clone(),
                     authorized_keys,
                 };
 
-                logger
-                    .log(&format!("creating ssh session on {}", uri))
-                    .await?;
+                Logger::log(&format!("creating ssh session on {}", uri));
 
                 let session = server::run_stream(Arc::new(ssh_config), socket, ssh_handler).await?;
 
@@ -301,13 +297,11 @@ impl Connection {
                     let _ = session.await;
                 });
 
-                logger
-                    .log(&format!("ssh session created on {}", uri))
-                    .await?;
+                Logger::log(&format!("ssh session created on {}", uri));
 
                 let channel = channel_rx.await?;
 
-                logger.log("MMM accepted session creation").await?;
+                Logger::log("MMM accepted session creation");
 
                 Ok(Connection::SshHost(channel.into_stream()))
             }
@@ -316,7 +310,6 @@ impl Connection {
 
     pub async fn connect(
         fingerprint_from_out_of_band: String,
-        mut logger: Arc<Mutex<Logger>>,
         client_key_path: Option<std::path::PathBuf>,
     ) -> DynResult<Self> {
         let client_key = if let Some(path) = client_key_path {
@@ -334,14 +327,12 @@ impl Connection {
             let (fingerprint, connection_string) = decoded.split_at(32);
 
             let conn_str = String::from_utf8_lossy(connection_string);
-            logger.log(&format!("aaa {}", conn_str)).await?;
+            Logger::log(&format!("aaa {}", conn_str));
 
             let conn_uri = Uri::from_str(&conn_str)?;
 
-            logger.log(&format!("uri {:?}", conn_uri)).await?;
-            logger
-                .log(&format!("scheme {:?}", conn_uri.scheme_str()))
-                .await?;
+            Logger::log(&format!("uri {:?}", conn_uri));
+            Logger::log(&format!("scheme {:?}", conn_uri.scheme_str()));
 
             if conn_uri.scheme_str().is_some_and(|s| s == "ssh") {
                 (
@@ -369,7 +360,7 @@ impl Connection {
         let uri =
             format!("{}:32700", String::from_utf8_lossy(&connection_string)).parse::<Uri>()?;
 
-        logger.log(&format!("Connecting to {}", uri)).await?;
+        Logger::log(&format!("Connecting to {}", uri));
 
         match connection_mode {
             ConnectionMode::Direct => {
@@ -385,8 +376,6 @@ impl Connection {
                 let (ws_stream, _) =
                     connect_async_tls_with_config(uri, None, false, Some(tls_connector)).await?;
 
-                // logger.log("Connected with pinned certificate").await?;
-
                 Ok(Connection::DirectClient(ws_stream))
             }
             ConnectionMode::Ssh => {
@@ -399,20 +388,18 @@ impl Connection {
                 let host = uri.host().ok_or("missing host")?;
                 let address = format!("{}:32700", host);
 
-                logger
-                    .log(&format!("creating ssh session on {}", &address))
-                    .await?;
+                Logger::log(&format!("creating ssh session on {}", &address));
 
                 let mut session =
                     client::connect(Arc::new(ssh_config), &address, ssh_handler).await?;
 
-                logger
-                    .log(&format!("ssh session created on {}", address))
-                    .await?;
+                Logger::log(&format!("ssh session created on {}", address));
 
                 let auth_result = if let Some(ref key) = client_key {
                     let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(key.clone()), None);
-                    session.authenticate_publickey("peer", key_with_hash).await?
+                    session
+                        .authenticate_publickey("peer", key_with_hash)
+                        .await?
                 } else {
                     session.authenticate_none("peer").await?
                 };
@@ -423,9 +410,7 @@ impl Connection {
 
                 let channel = session.channel_open_session().await?;
 
-                logger
-                    .log(&format!("ssh session created on {}", address))
-                    .await?;
+                Logger::log(&format!("ssh session created on {}", address));
 
                 Ok(Connection::SshClient(channel.into_stream()))
             }
@@ -637,7 +622,6 @@ impl ServerCertVerifier for FingerprintVerifier {
 
 struct ServerFlow {
     channel_tx: Option<oneshot::Sender<Channel<server::Msg>>>,
-    logger: Arc<Mutex<Logger>>,
     authorized_keys: Vec<Vec<u8>>,
 }
 
@@ -685,7 +669,7 @@ impl server::Handler for ServerFlow {
         channel: Channel<server::Msg>,
         _session: &mut server::Session,
     ) -> Result<bool, Self::Error> {
-        self.logger.log("MMM accepting session creation").await?;
+        Logger::log("MMM accepting session creation");
 
         if let Some(tx) = self.channel_tx.take() {
             let _ = tx.send(channel);

@@ -1,13 +1,8 @@
-use std::sync::Arc;
-
 use serde::{Deserialize, Serialize};
 use serde_json::{from_slice, to_string};
-use tokio::{
-    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader},
-    sync::Mutex,
-};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 
-use crate::{DynResult, Logger};
+use crate::DynResult;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct IdProp {

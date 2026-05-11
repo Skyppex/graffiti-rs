@@ -13,33 +13,29 @@ use crate::{
     net::connection::{Connection, ConnectionMode, Message},
     ppp,
     state::State,
-    DynResult, Log, Logger,
+    DynResult, Logger,
 };
 
 pub async fn run_host(
     state: Arc<Mutex<State>>,
     sender: Sender<send::Message>,
     mut receiver: Receiver<receive::Message>,
-    mut logger: Arc<Mutex<Logger>>,
     authorized_keys_path: Option<std::path::PathBuf>,
 ) -> DynResult<()> {
+    Logger::log("connecting...");
     let stream = Connection::host(
         ConnectionMode::Ssh,
         async |fingerprint| {
-            logger
-                .clone()
-                .log(&format!("Fingerprint: {}", &fingerprint))
-                .await?;
+            Logger::log(&format!("Fingerprint: {}", &fingerprint));
 
             sender.send(send::Message::Fingerprint(fingerprint)).await?;
             Ok(())
         },
-        logger.clone(),
         authorized_keys_path,
     )
     .await?;
 
-    logger.log("connection established").await?;
+    Logger::log("connection established");
 
     let (mut writer, mut reader) = stream.split();
 
@@ -49,7 +45,7 @@ pub async fn run_host(
         tokio::select! {
             // Handle websocket messages
             Some(msg) = reader.next() => {
-                logger.log(&format!("Received from client: {:?}", msg)).await?;
+                Logger::log(&format!("Received from client: {:?}", msg));
 
                 if msg.is_err() {
                     break;
@@ -58,32 +54,32 @@ pub async fn run_host(
                 let msg = msg?;
 
                 if let Message::Close = msg {
-                    logger.log("Client disconnected").await?;
+                    Logger::log("Client disconnected");
                     break;
                 }
 
-                ppp::receive::handle_message(msg, state.clone(), &mut writer, &sender, logger.clone()).await?;
+                ppp::receive::handle_message(msg, state.clone(), &mut writer, &sender).await?;
             }
             // Handle channel messages
             Some(msg) = receiver.recv() => {
-                logger.log(&format!("Received from main: {}", msg)).await?;
+                Logger::log(&format!("Received from main: {}", msg));
 
                 if let receive::Message::Shutdown(id) = msg {
-                    logger.log("Shutting down").await?;
+                    Logger::log("Shutting down");
                     writer.send(Message::Close).await?;
                     shutdown_id = Some(id);
                 } else {
-                    receive::handle_message(msg, state.clone(), &mut writer, logger.clone()).await?;
+                    receive::handle_message(msg, state.clone(), &mut writer).await?;
                 }
             }
         }
     }
 
-    logger.log("Websocket connection closed").await?;
+    Logger::log("Websocket connection closed");
     writer.close().await?;
-    logger.log("closed websocket sink").await?;
+    Logger::log("closed websocket sink");
     sender.send(send::Message::Shutdown(shutdown_id)).await?;
-    logger.log("shutdown sent to main").await?;
+    Logger::log("shutdown sent to main");
 
     Ok(())
 }
@@ -93,14 +89,13 @@ pub async fn run_client(
     state: Arc<Mutex<State>>,
     sender: Sender<send::Message>,
     mut receiver: Receiver<receive::Message>,
-    mut logger: Arc<Mutex<Logger>>,
     client_key_path: Option<std::path::PathBuf>,
 ) -> DynResult<()> {
-    let stream = Connection::connect(fingerprint, logger.clone(), client_key_path).await?;
+    let stream = Connection::connect(fingerprint, client_key_path).await?;
 
     let (mut writer, mut reader) = stream.split();
 
-    ppp::send::initialize(state.clone(), &mut writer, logger.clone()).await?;
+    ppp::send::initialize(state.clone(), &mut writer).await?;
 
     let mut shutdown_id = None;
 
@@ -108,7 +103,7 @@ pub async fn run_client(
         tokio::select! {
             // Handle incoming messages
             Some(msg) = reader.next() => {
-                logger.log("Received from host").await?;
+                Logger::log("Received from host");
 
                 if msg.is_err() {
                     break;
@@ -117,32 +112,33 @@ pub async fn run_client(
                 let msg = msg?;
 
                 if let Message::Close = msg {
-                    logger.log("Disconnected by server").await?;
+                    Logger::log("Disconnected by server");
                     break;
                 }
 
-                ppp::receive::handle_message(msg, state.clone(), &mut writer, &sender, logger.clone()).await?;
+                ppp::receive::handle_message(msg, state.clone(), &mut writer, &sender).await?;
             }
             // Handle channel messages
             Some(msg) = receiver.recv() => {
-                logger.log(&format!("Received from main: {}", msg)).await?;
+                Logger::log(&format!("Received from main: {}", msg));
 
                 if let receive::Message::Shutdown(id) = msg {
-                    logger.log("Shutting down").await?;
+                    Logger::log("Shutting down");
                     writer.send(Message::Close).await?;
                     shutdown_id = Some(id);
                 } else {
-                    receive::handle_message(msg, state.clone(), &mut writer, logger.clone()).await?;
+                    receive::handle_message(msg, state.clone(), &mut writer).await?;
                 }
             }
         }
     }
 
-    logger.log("Websocket connection closed").await?;
+    Logger::log("Websocket connection closed");
     writer.close().await?;
-    logger.log("closed websocket sink").await?;
+    Logger::log("closed websocket sink");
     sender.send(send::Message::Shutdown(shutdown_id)).await?;
-    logger.log("shutdown sent to main").await?;
+    Logger::log("shutdown sent to main");
 
     Ok(())
 }
+
