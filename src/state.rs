@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc::Sender, Mutex};
 use twox_hash::XxHash64;
 
 use crate::{csp, ppp};
@@ -19,6 +19,7 @@ pub struct State {
     is_host: bool,
     pub client_id: String,
     pub fingerprint: Option<String>,
+    pub writer_tx: Sender<Vec<u8>>,
     network_requests: HashMap<String, Box<Request>>,
     client_locations: HashMap<String, DocumentLocation>,
     file_hashes: HashMap<PathBuf, u64>,
@@ -30,6 +31,7 @@ impl State {
         custom_ignore_file: Option<PathBuf>,
         is_host: bool,
         client_id: String,
+        writer_tx: Sender<Vec<u8>>,
     ) -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(State {
             cwd,
@@ -38,6 +40,7 @@ impl State {
             is_host,
             client_id,
             fingerprint: None,
+            writer_tx,
             network_requests: HashMap::new(),
             client_locations: HashMap::new(),
             file_hashes: HashMap::new(),

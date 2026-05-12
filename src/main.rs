@@ -21,7 +21,7 @@ use id::next_client_id;
 use net::{run_client, run_host};
 use state::State;
 use tokio::{
-    io::{self, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
+    io::{self, AsyncRead, AsyncWriteExt, BufReader},
     sync::{
         mpsc::{self, Sender},
         Mutex,
@@ -47,6 +47,8 @@ async fn main() -> DynResult<()> {
     let (send_to_main, mut receive_from_thread) = mpsc::channel::<net::send::Message>(8);
     let (send_to_thread, receive_from_main) = mpsc::channel::<net::receive::Message>(8);
 
+    let (writer_tx, mut writer_rx) = mpsc::channel::<Vec<u8>>(8);
+
     let cwd = std::env::current_dir()?;
 
     info!("Current working directory: {:?}", cwd);
@@ -55,7 +57,13 @@ async fn main() -> DynResult<()> {
 
     info!("next_client_id = {}", next_client_id);
 
-    let state = State::new(cwd, cli.graffitiignore, is_host, next_client_id);
+    let state = State::new(
+        cwd,
+        cli.graffitiignore,
+        is_host,
+        next_client_id,
+        writer_tx.clone(),
+    );
 
     info!("my client id is {}", state.lock().await.client_id);
 
@@ -81,42 +89,68 @@ async fn main() -> DynResult<()> {
         }
     };
 
+    let writer_handle = tokio::spawn(async move {
+        let mut writer = io::stdout();
+        while let Some(data) = writer_rx.recv().await {
+            if writer.write_all(&data).await.is_err() {
+                break;
+            }
+        }
+        info!("Writer task exited");
+    });
+
+    let (network_shutdown_tx, mut network_shutdown_rx) = mpsc::channel(1);
+
+    let network_writer_tx = writer_tx.clone();
+    let network_state = state.clone();
+    let network_handler_handle = tokio::spawn(async move {
+        let mut shutting_down = false;
+        while let Some(message) = receive_from_thread.recv().await {
+            match handle_network_message(message, network_writer_tx.clone(), network_state.clone())
+                .await
+            {
+                Ok(result) => {
+                    if result.should_shutdown {
+                        shutting_down = true;
+                    }
+                }
+                Err(e) => {
+                    info!("Error handling network message: {}", e);
+                }
+            }
+        }
+        let _ = network_shutdown_tx.send(()).await;
+        shutting_down
+    });
+
     let stdin = io::stdin();
     let mut scanner = BufReader::new(stdin);
-
-    let mut writer = io::stdout();
 
     info!("Entering main message loop");
 
     let mut shutting_down = false;
 
+    let main_state = state.clone();
+
     loop {
         tokio::select! {
-            // Handle messages from the network thread
-            Some(message) = receive_from_thread.recv() => {
-                let result = handle_network_message(message, &mut writer, state.clone()).await?;
-
-                if result.should_shutdown {
+            result = network_shutdown_rx.recv() => {
+                if result.is_some() {
                     shutting_down = true;
                 }
+                break;
             }
-
-            // Handle stdin
             Ok(HandledMessage {
                 should_exit,
-            }) = handle_input(&mut scanner, &mut writer, &send_to_thread, state.clone()) => {
+            }) = handle_input(&mut scanner, &send_to_thread, main_state.clone()) => {
                 if should_exit {
                     break;
                 }
             }
-
-            else => {
-                continue;
-            }
         }
-
-        info!("Finished select iteration");
     }
+
+    let shutting_down = shutting_down || network_handler_handle.await.unwrap_or(false);
 
     match network_handle.await? {
         Ok(_) => {}
@@ -124,6 +158,9 @@ async fn main() -> DynResult<()> {
             info!("Network thread exited with error: {}", e);
         }
     }
+
+    drop(writer_tx);
+    writer_handle.await?;
 
     if !shutting_down {
         info!("Exiting without shutdown message");
@@ -136,7 +173,6 @@ async fn main() -> DynResult<()> {
 
 async fn handle_input(
     scanner: &mut BufReader<impl AsyncRead + Unpin>,
-    writer: &mut (impl AsyncWrite + Unpin),
     sender: &Sender<net::receive::Message>,
     state: Arc<Mutex<State>>,
 ) -> DynResult<HandledMessage> {
@@ -147,25 +183,18 @@ async fn handle_input(
 
     info!("Content: {:?}", String::from_utf8(decoded.content.clone()));
 
-    handle_message(
-        decoded.id,
-        &decoded.method,
-        &decoded.content,
-        writer,
-        sender,
-        state,
-    )
-    .await
+    handle_message(decoded.id, &decoded.method, &decoded.content, sender, state).await
 }
 
 async fn handle_message(
     id: Option<String>,
     method: &str,
     content: &[u8],
-    writer: &mut (impl AsyncWrite + Unpin),
     sender: &Sender<net::receive::Message>,
     state: Arc<Mutex<State>>,
 ) -> DynResult<HandledMessage> {
+    let writer_tx = state.lock().await.writer_tx.clone();
+
     match method {
         "initialize" => {
             let params = rpc::decode_params::<csp::InitializeRequest>(content)?;
@@ -194,7 +223,7 @@ async fn handle_message(
                 }),
             })?;
 
-            writer.write_all(&response).await?;
+            writer_tx.send(response).await?;
 
             Ok(HandledMessage { should_exit: false })
         }
@@ -264,7 +293,7 @@ async fn handle_message(
                 params: None,
             })?;
 
-            writer.write_all(&request).await?;
+            writer_tx.send(request).await?;
 
             Ok(HandledMessage { should_exit: false })
         }
@@ -298,7 +327,7 @@ async fn handle_message(
                 }),
             })?;
 
-            writer.write_all(&response).await?;
+            writer_tx.send(response).await?;
 
             Ok(HandledMessage { should_exit: false })
         }
@@ -322,8 +351,7 @@ async fn handle_message(
         _ => {
             info!("Received unknown message from editor");
             let response = rpc::encode("unknown method").unwrap();
-            writer.write_all(&response).await.unwrap();
-            writer.flush().await.unwrap();
+            writer_tx.send(response).await?;
 
             Ok(HandledMessage { should_exit: false })
         }
@@ -332,7 +360,7 @@ async fn handle_message(
 
 async fn handle_network_message(
     message: Message,
-    writer: &mut (impl AsyncWrite + Unpin),
+    writer_tx: Sender<Vec<u8>>,
     state: Arc<Mutex<State>>,
 ) -> DynResult<HandledNetworkMessage> {
     info!("Received from network: {}", message);
@@ -342,7 +370,7 @@ async fn handle_network_message(
             let response = rpc::encode(Response::<ShutdownResponse> { id, result: None })?;
 
             info!("Sending shutdown response to editor");
-            writer.write_all(&response).await?;
+            writer_tx.send(response).await?;
             info!("Sent shutdown response to editor");
 
             Ok(HandledNetworkMessage {
@@ -357,7 +385,7 @@ async fn handle_network_message(
             })?;
 
             info!("Sending shutdown request to editor");
-            writer.write_all(&request).await?;
+            writer_tx.send(request).await?;
             info!("Sent shutdown request to editor");
 
             Ok(HandledNetworkMessage {
@@ -372,7 +400,7 @@ async fn handle_network_message(
                 params: Some(FingerprintGeneratedNotification { fingerprint }),
             })?;
 
-            writer.write_all(&notification).await?;
+            writer_tx.send(notification).await?;
 
             Ok(HandledNetworkMessage {
                 should_shutdown: false,
@@ -394,7 +422,7 @@ async fn handle_network_message(
                 }),
             })?;
 
-            writer.write_all(&request).await?;
+            writer_tx.send(request).await?;
 
             Ok(HandledNetworkMessage {
                 should_shutdown: false,
@@ -422,7 +450,7 @@ async fn handle_network_message(
                     params: Some(csp::ClientIdChangedNotification { client_id }),
                 })?;
 
-                writer.write_all(&notification).await?;
+                writer_tx.send(notification).await?;
             }
 
             Ok(HandledNetworkMessage {
@@ -441,7 +469,7 @@ async fn handle_network_message(
                 }),
             })?;
 
-            writer.write_all(&notification).await?;
+            writer_tx.send(notification).await?;
 
             Ok(HandledNetworkMessage {
                 should_shutdown: false,
@@ -463,7 +491,7 @@ async fn handle_network_message(
                 }),
             })?;
 
-            writer.write_all(&notification).await?;
+            writer_tx.send(notification).await?;
 
             Ok(HandledNetworkMessage {
                 should_shutdown: false,
@@ -503,21 +531,20 @@ mod tests {
         let method = decoded.method;
         let content = decoded.content;
 
-        let mut writer = Vec::new();
+        let (writer_tx, _) = mpsc::channel(8);
         let (sender, _) = mpsc::channel(8);
 
         handle_message(
             id,
             &method,
             &content,
-            &mut writer,
             &sender,
-            State::new(PathBuf::new(), None, true, next_client_id()),
+            State::new(PathBuf::new(), None, true, next_client_id(), writer_tx),
         )
         .await
         .unwrap();
 
-        writer
+        Vec::new()
     }
 
     #[tokio::test]
