@@ -1,6 +1,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use tokio::sync::Mutex;
+use tracing::info;
 
 use crate::{
     id::{next_client_id, next_request_id},
@@ -8,7 +9,7 @@ use crate::{
     ppp::{HostInfo, InitializeResponse, Response},
     rpc,
     state::State,
-    DynResult, Logger,
+    DynResult,
 };
 
 use super::{
@@ -18,7 +19,7 @@ use super::{
 };
 
 pub async fn initialize(state: Arc<Mutex<State>>, writer: &mut ConnectionWriter) -> DynResult<()> {
-    Logger::log("sending initialize to host");
+    info!("sending initialize to host");
 
     let request = Request::<InitializeRequest> {
         id: next_request_id(),
@@ -66,21 +67,18 @@ pub async fn initialize_response(
         }),
     })?;
 
-    Logger::log("sending initialize response to client");
-    Logger::log(&format!(
-        "response: {}",
-        String::from_utf8(response.clone()).unwrap()
-    ));
+    info!("sending initialize response to client");
+    info!("response: {}", String::from_utf8(response.clone()).unwrap());
 
     writer.send(Message::Data(response)).await?;
 
-    Logger::log("sent initialize response to client");
+    info!("sent initialize response to client");
 
     Ok(())
 }
 
 pub async fn initialized(writer: &mut ConnectionWriter) -> DynResult<()> {
-    Logger::log("sending initialized to host");
+    info!("sending initialized to host");
 
     let request = rpc::encode(Notification::<InitializedNotification> {
         method: "initialized".into(),
@@ -99,7 +97,7 @@ pub async fn cursor_moved(
     client_id: String,
     location: DocumentLocation,
 ) -> DynResult<()> {
-    Logger::log("sending cursor_moved");
+    info!("sending cursor_moved");
 
     let request = rpc::encode(Notification::<CursorMovedNotification> {
         method: "cursor_moved".into(),
@@ -120,7 +118,7 @@ pub async fn document_edit_full(
     uri: PathBuf,
     content: String,
 ) -> DynResult<()> {
-    Logger::log("sending document_edit_full");
+    info!("sending document_edit_full");
 
     let notification = rpc::encode(Notification::<DocumentEditFullNotification> {
         method: "document/edit".into(),
@@ -142,7 +140,7 @@ pub async fn directories_upload(
     client_id: String,
     directories: Vec<Directory>,
 ) -> DynResult<()> {
-    Logger::log("sending directories/upload");
+    info!("sending directories/upload");
 
     let notification = rpc::encode(Notification::<DirectoriesUploadNotification> {
         method: "directories/upload".into(),
@@ -158,7 +156,7 @@ pub async fn directories_upload(
 }
 
 pub async fn initial_file_uri(writer: &mut ConnectionWriter, uri: PathBuf) -> DynResult<()> {
-    Logger::log("sending initial_file_uri");
+    info!("sending initial_file_uri");
 
     let notification = rpc::encode(Notification::<InitialFileNotification> {
         method: "initial_file_uri".into(),

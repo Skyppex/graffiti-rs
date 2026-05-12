@@ -8,12 +8,13 @@ use tokio::sync::{
     mpsc::{Receiver, Sender},
     Mutex,
 };
+use tracing::info;
 
 use crate::{
     net::connection::{Connection, ConnectionMode, Message},
     ppp,
     state::State,
-    DynResult, Logger,
+    DynResult,
 };
 
 pub async fn run_host(
@@ -22,11 +23,11 @@ pub async fn run_host(
     mut receiver: Receiver<receive::Message>,
     authorized_keys_path: Option<std::path::PathBuf>,
 ) -> DynResult<()> {
-    Logger::log("connecting...");
+    info!("connecting...");
     let stream = Connection::host(
         ConnectionMode::Ssh,
         async |fingerprint| {
-            Logger::log(&format!("Fingerprint: {}", &fingerprint));
+            info!("Fingerprint: {}", &fingerprint);
 
             sender.send(send::Message::Fingerprint(fingerprint)).await?;
             Ok(())
@@ -35,7 +36,7 @@ pub async fn run_host(
     )
     .await?;
 
-    Logger::log("connection established");
+    info!("connection established");
 
     let (mut writer, mut reader) = stream.split();
 
@@ -45,7 +46,7 @@ pub async fn run_host(
         tokio::select! {
             // Handle websocket messages
             Some(msg) = reader.next() => {
-                Logger::log(&format!("Received from client: {:?}", msg));
+                info!("Received from client: {:?}", msg);
 
                 if msg.is_err() {
                     break;
@@ -54,7 +55,7 @@ pub async fn run_host(
                 let msg = msg?;
 
                 if let Message::Close = msg {
-                    Logger::log("Client disconnected");
+                    info!("Client disconnected");
                     break;
                 }
 
@@ -62,10 +63,10 @@ pub async fn run_host(
             }
             // Handle channel messages
             Some(msg) = receiver.recv() => {
-                Logger::log(&format!("Received from main: {}", msg));
+                info!("Received from main: {}", msg);
 
                 if let receive::Message::Shutdown(id) = msg {
-                    Logger::log("Shutting down");
+                    info!("Shutting down");
                     writer.send(Message::Close).await?;
                     shutdown_id = Some(id);
                 } else {
@@ -75,11 +76,11 @@ pub async fn run_host(
         }
     }
 
-    Logger::log("Websocket connection closed");
+    info!("Websocket connection closed");
     writer.close().await?;
-    Logger::log("closed websocket sink");
+    info!("closed websocket sink");
     sender.send(send::Message::Shutdown(shutdown_id)).await?;
-    Logger::log("shutdown sent to main");
+    info!("shutdown sent to main");
 
     Ok(())
 }
@@ -103,7 +104,7 @@ pub async fn run_client(
         tokio::select! {
             // Handle incoming messages
             Some(msg) = reader.next() => {
-                Logger::log("Received from host");
+                info!("Received from host");
 
                 if msg.is_err() {
                     break;
@@ -112,7 +113,7 @@ pub async fn run_client(
                 let msg = msg?;
 
                 if let Message::Close = msg {
-                    Logger::log("Disconnected by server");
+                    info!("Disconnected by server");
                     break;
                 }
 
@@ -120,10 +121,10 @@ pub async fn run_client(
             }
             // Handle channel messages
             Some(msg) = receiver.recv() => {
-                Logger::log(&format!("Received from main: {}", msg));
+                info!("Received from main: {}", msg);
 
                 if let receive::Message::Shutdown(id) = msg {
-                    Logger::log("Shutting down");
+                    info!("Shutting down");
                     writer.send(Message::Close).await?;
                     shutdown_id = Some(id);
                 } else {
@@ -133,12 +134,11 @@ pub async fn run_client(
         }
     }
 
-    Logger::log("Websocket connection closed");
+    info!("Websocket connection closed");
     writer.close().await?;
-    Logger::log("closed websocket sink");
+    info!("closed websocket sink");
     sender.send(send::Message::Shutdown(shutdown_id)).await?;
-    Logger::log("shutdown sent to main");
+    info!("shutdown sent to main");
 
     Ok(())
 }
-
