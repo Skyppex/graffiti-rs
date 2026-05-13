@@ -1,4 +1,4 @@
-use std::{future::Future, net::IpAddr, str::FromStr, sync::Arc};
+use std::{future::Future, str::FromStr, sync::Arc};
 
 use futures_util::{
     stream::{SplitSink, SplitStream},
@@ -226,14 +226,8 @@ impl Connection {
             ConnectionMode::Direct => {
                 let ip = get_ip().await.unwrap_or_else(|_| "127.0.0.1".to_string());
                 let cert_data = generate_cert(ip.clone());
-                let ip = IpAddr::from_str(&ip)?;
 
-                let octets = match ip {
-                    IpAddr::V4(v4) => v4.octets().to_vec(),
-                    IpAddr::V6(v6) => v6.octets().to_vec(),
-                };
-
-                let connection_string = [b"ws://".to_vec(), octets].concat();
+                let connection_string = format!("wss://{}", ip).into_bytes();
                 let fingerprint = compute_fingerprint(&cert_data.certs[0], &connection_string);
 
                 fingerprint_generated(fingerprint.clone()).await?;
@@ -341,7 +335,10 @@ impl Connection {
                     connection_string.to_vec(),
                     ConnectionMode::Ssh,
                 )
-            } else if conn_uri.scheme_str().is_some_and(|s| s == "wss") {
+            } else if conn_uri
+                .scheme_str()
+                .is_some_and(|s| matches!(s, "ws" | "wss"))
+            {
                 (
                     fingerprint.to_vec(),
                     connection_string.to_vec(),
@@ -352,10 +349,16 @@ impl Connection {
             }
         };
 
-        let connection_string = if connection_string == ip.as_bytes().to_vec() {
-            b"127.0.0.1".to_vec()
+        let is_local = {
+            let conn_str = String::from_utf8_lossy(&connection_string);
+            let host = conn_str.split("://").nth(1).unwrap_or("");
+            host == ip
+        };
+
+        let connection_string = if is_local {
+            b"wss://127.0.0.1".to_vec()
         } else {
-            connection_string
+            connection_string.to_vec()
         };
 
         let uri =

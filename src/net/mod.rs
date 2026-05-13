@@ -25,7 +25,7 @@ pub async fn run_host(
 ) -> DynResult<()> {
     info!("connecting...");
     let stream = Connection::host(
-        ConnectionMode::Ssh,
+        ConnectionMode::Direct,
         async |fingerprint| {
             info!("Fingerprint: {}", &fingerprint);
 
