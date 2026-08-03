@@ -10,7 +10,7 @@ use rcgen::CertifiedKey;
 use russh::{
     client,
     keys::{ssh_key, Algorithm, PrivateKey, PrivateKeyWithHashAlg},
-    server, Channel, ChannelMsg, ChannelStream,
+    server, Channel, ChannelMsg, ChannelStream, MethodKind, MethodSet,
 };
 use rustls::{
     client::danger::{ServerCertVerified, ServerCertVerifier},
@@ -30,7 +30,7 @@ use tokio_tungstenite::{
     Connector, MaybeTlsStream, WebSocketStream,
 };
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
-use tracing::{debug, info};
+use tracing::{info, warn};
 
 use crate::{DynError, DynResult};
 
@@ -176,7 +176,13 @@ fn compute_token_simple(data: &[u8]) -> Vec<u8> {
 }
 
 fn load_authorized_keys(path: &std::path::Path) -> DynResult<Vec<Vec<u8>>> {
-    let content = std::fs::read_to_string(path)?;
+    let content = std::fs::read_to_string(path).map_err(|e| {
+        format!(
+            "failed to read authorized keys file {}: {}",
+            path.display(),
+            e
+        )
+    })?;
     let mut fingerprints = Vec::new();
 
     for line in content.lines() {
@@ -185,17 +191,14 @@ fn load_authorized_keys(path: &std::path::Path) -> DynResult<Vec<Vec<u8>>> {
             continue;
         }
 
-        let fingerprint = if line.starts_with("ssh-") {
-            let key = ssh_key::PublicKey::from_openssh(line)
-                .map_err(|e| format!("failed to parse public key: {}", e))?;
-            compute_token_simple(key.to_bytes()?.as_ref())
-        } else if line.len() == 64 && line.chars().all(|c| c.is_ascii_hexdigit()) {
-            base64::prelude::BASE64_STANDARD.decode(line)?
-        } else {
-            continue;
-        };
+        match ssh_key::PublicKey::from_openssh(line) {
+            Ok(key) => fingerprints.push(compute_token_simple(key.to_bytes()?.as_ref())),
+            Err(e) => warn!("skipping unparseable authorized keys line: {}", e),
+        }
+    }
 
-        fingerprints.push(fingerprint);
+    if fingerprints.is_empty() {
+        return Err(format!("no valid public keys in {}", path.display()).into());
     }
 
     Ok(fingerprints)
@@ -205,17 +208,13 @@ impl Connection {
     pub async fn host<F, Fut>(
         mode: ConnectionMode,
         token_generated: F,
-        authorized_keys_path: Option<std::path::PathBuf>,
+        authorized_keys_path: std::path::PathBuf,
     ) -> DynResult<Self>
     where
         F: FnOnce(String) -> Fut,
         Fut: Future<Output = DynResult<()>>,
     {
-        let authorized_keys = if let Some(path) = authorized_keys_path {
-            load_authorized_keys(&path).unwrap_or_default()
-        } else {
-            Vec::new()
-        };
+        let authorized_keys = load_authorized_keys(&authorized_keys_path)?;
         match mode {
             ConnectionMode::Direct => {
                 let ip = get_ip().await.unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -296,7 +295,7 @@ impl Connection {
 
                 let channel = channel_rx.await?;
 
-                info!("MMM accepted session creation");
+                info!("accepted session creation");
 
                 Ok(Connection::SshHost(channel.into_stream()))
             }
@@ -305,14 +304,18 @@ impl Connection {
 
     pub async fn connect(
         token_from_out_of_band: String,
-        client_key_path: Option<std::path::PathBuf>,
+        client_key_path: std::path::PathBuf,
     ) -> DynResult<Self> {
-        let client_key = if let Some(path) = client_key_path {
-            let content = tokio::fs::read_to_string(&path).await?;
-            Some(PrivateKey::from_openssh(&content)?)
-        } else {
-            None
-        };
+        let content = tokio::fs::read_to_string(&client_key_path)
+            .await
+            .map_err(|e| {
+                format!(
+                    "failed to read client key file {}: {}",
+                    client_key_path.display(),
+                    e
+                )
+            })?;
+        let client_key = PrivateKey::from_openssh(&content)?;
 
         let ip = get_ip().await.unwrap_or_else(|_| "127.0.0.1".to_string());
 
@@ -391,14 +394,10 @@ impl Connection {
 
                 info!("ssh session created on {}", address);
 
-                let auth_result = if let Some(ref key) = client_key {
-                    let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(key.clone()), None);
-                    session
-                        .authenticate_publickey("peer", key_with_hash)
-                        .await?
-                } else {
-                    session.authenticate_none("peer").await?
-                };
+                let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(client_key), None);
+                let auth_result = session
+                    .authenticate_publickey("peer", key_with_hash)
+                    .await?;
 
                 if !auth_result.success() {
                     return Err("failed to authenticate over ssh".into());
@@ -630,7 +629,10 @@ impl server::Handler for ServerFlow {
     type Error = DynError;
 
     async fn auth_none(&mut self, _user: &str) -> Result<russh::server::Auth, Self::Error> {
-        Ok(russh::server::Auth::Accept)
+        Ok(russh::server::Auth::Reject {
+            proceed_with_methods: Some(MethodSet::from(&[MethodKind::PublicKey][..])),
+            partial_success: false,
+        })
     }
 
     async fn auth_password(
@@ -646,10 +648,6 @@ impl server::Handler for ServerFlow {
         _user: &str,
         public_key: &russh::keys::PublicKey,
     ) -> Result<russh::server::Auth, Self::Error> {
-        if self.authorized_keys.is_empty() {
-            return Ok(russh::server::Auth::Accept);
-        }
-
         let key_bytes = public_key.to_bytes().map_err(|e| e.to_string())?;
         let key_fingerprint = compute_token_simple(key_bytes.as_ref());
 
@@ -665,7 +663,7 @@ impl server::Handler for ServerFlow {
         channel: Channel<server::Msg>,
         _session: &mut server::Session,
     ) -> Result<bool, Self::Error> {
-        info!("MMM accepting session creation");
+        info!("accepting session creation");
 
         if let Some(tx) = self.channel_tx.take() {
             let _ = tx.send(channel);

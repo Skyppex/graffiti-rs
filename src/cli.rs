@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use clap::{ArgGroup, Parser, Subcommand};
 
+use crate::path_utils::get_path;
+
 #[derive(Debug, Clone, Parser)]
 #[command(group = ArgGroup::new("log").args(["log_file", "log_to_stderr"]).required(false).multiple(false))]
 pub struct Cli {
@@ -25,14 +27,14 @@ pub enum Commands {
     /// Start as a host
     Host {
         /// Path to authorized_keys file for public key authentication
-        #[arg(long)]
-        authorized_keys: Option<PathBuf>,
+        #[arg(long, value_parser = get_path)]
+        authorized_keys: PathBuf,
     },
     /// Connect to a host
     Connect {
         sha: String,
         /// Path to client's private key for public key authentication
-        #[arg(long)]
-        client_key: Option<PathBuf>,
+        #[arg(long, value_parser = get_path)]
+        client_key: PathBuf,
     },
 }

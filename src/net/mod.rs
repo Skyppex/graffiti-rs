@@ -8,7 +8,7 @@ use tokio::sync::{
     mpsc::{Receiver, Sender},
     Mutex,
 };
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::{
     net::connection::{Connection, ConnectionMode, Message},
@@ -21,7 +21,7 @@ pub async fn run_host(
     state: Arc<Mutex<State>>,
     sender: Sender<send::Message>,
     mut receiver: Receiver<receive::Message>,
-    authorized_keys_path: Option<std::path::PathBuf>,
+    authorized_keys_path: std::path::PathBuf,
 ) -> DynResult<()> {
     info!("connecting...");
     let stream = Connection::host(
@@ -90,7 +90,7 @@ pub async fn run_client(
     state: Arc<Mutex<State>>,
     sender: Sender<send::Message>,
     mut receiver: Receiver<receive::Message>,
-    client_key_path: Option<std::path::PathBuf>,
+    client_key_path: std::path::PathBuf,
 ) -> DynResult<()> {
     let stream = Connection::connect(fingerprint, client_key_path).await?;
 
