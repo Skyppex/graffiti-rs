@@ -92,16 +92,12 @@ pub async fn run_client(
     mut receiver: Receiver<receive::Message>,
     client_key_path: Option<std::path::PathBuf>,
 ) -> DynResult<()> {
-    debug!("1");
     let stream = Connection::connect(fingerprint, client_key_path).await?;
 
-    debug!("2");
     let (mut writer, mut reader) = stream.split();
 
-    debug!("3");
     ppp::send::initialize(state.clone(), &mut writer).await?;
 
-    debug!("4");
     let mut shutdown_id = None;
 
     loop {

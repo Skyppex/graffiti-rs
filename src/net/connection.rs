@@ -1,5 +1,6 @@
 use std::{future::Future, net::IpAddr, str::FromStr, sync::Arc};
 
+use base64::Engine;
 use futures_util::{
     stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
@@ -165,7 +166,7 @@ fn compute_token(data: &[u8], connection_string: &[u8]) -> String {
         .chain(connection_string.iter().copied())
         .collect::<Vec<u8>>();
 
-    hex::encode(result)
+    base64::prelude::BASE64_STANDARD.encode(result)
 }
 
 fn compute_token_simple(data: &[u8]) -> Vec<u8> {
@@ -189,7 +190,7 @@ fn load_authorized_keys(path: &std::path::Path) -> DynResult<Vec<Vec<u8>>> {
                 .map_err(|e| format!("failed to parse public key: {}", e))?;
             compute_token_simple(key.to_bytes()?.as_ref())
         } else if line.len() == 64 && line.chars().all(|c| c.is_ascii_hexdigit()) {
-            hex::decode(line)?
+            base64::prelude::BASE64_STANDARD.decode(line)?
         } else {
             continue;
         };
@@ -306,29 +307,22 @@ impl Connection {
         token_from_out_of_band: String,
         client_key_path: Option<std::path::PathBuf>,
     ) -> DynResult<Self> {
-        debug!("100");
         let client_key = if let Some(path) = client_key_path {
-            debug!("101");
-            debug!("client_key_path: {:?}", &path);
             let content = tokio::fs::read_to_string(&path).await?;
-            debug!("101.1");
             Some(PrivateKey::from_openssh(&content)?)
         } else {
             None
         };
 
-        debug!("102");
         let ip = get_ip().await.unwrap_or_else(|_| "127.0.0.1".to_string());
 
-        debug!("103");
         let (fingerprint, connection_string, connection_mode) = {
-            let decoded = hex::decode(token_from_out_of_band.clone())?;
+            let decoded =
+                base64::prelude::BASE64_STANDARD.decode(token_from_out_of_band.clone())?;
 
-            info!("aa {}", String::from_utf8_lossy(&decoded));
             let (fingerprint, connection_string) = decoded.split_at(32);
 
             let conn_str = String::from_utf8_lossy(connection_string);
-            info!("aaa {}", conn_str);
 
             let conn_uri = Uri::from_str(&conn_str)?;
 
