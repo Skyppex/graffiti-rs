@@ -31,13 +31,8 @@ pub async fn handle_message(
 ) -> DynResult<()> {
     if let Message::Data(data) = msg {
         info!("Received network message");
-        info!("data: {:?}", &data);
 
-        let decoded = rpc::decode_message(&data).await;
-
-        info!("{:?}", decoded);
-
-        let decoded = decoded?;
+        let decoded = rpc::decode_message(&data).await?;
 
         let id = decoded.id;
         let method = decoded.method;
@@ -97,13 +92,13 @@ async fn handle_response(
 
                 tokio::fs::create_dir_all(&new_cwd).await?;
                 state.set_cwd(new_cwd);
-                state.set_client_id(result.client_id);
+                state.set_client_id(result.client_id.clone());
 
-                info!("my client id is {}", state.client_id);
+                info!("my client id is {}", result.client_id);
 
                 tokio::try_join!(
                     sender
-                        .send(send::Message::Initialized(state.client_id.clone()))
+                        .send(send::Message::Initialized(result.client_id))
                         .map_err(|e| e.into()),
                     ppp::send::initialized(writer)
                 )?;

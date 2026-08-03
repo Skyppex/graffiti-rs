@@ -30,7 +30,6 @@ impl State {
         cwd: PathBuf,
         custom_ignore_file: Option<PathBuf>,
         is_host: bool,
-        client_id: String,
         writer_tx: Sender<Vec<u8>>,
     ) -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(State {
@@ -38,7 +37,7 @@ impl State {
             custom_ignore_file,
             remote_projects_path: None,
             is_host,
-            client_id,
+            client_id: "0".to_owned(),
             fingerprint: None,
             writer_tx,
             network_requests: HashMap::new(),

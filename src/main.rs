@@ -53,23 +53,16 @@ async fn main() -> DynResult<()> {
 
     info!("Current working directory: {:?}", cwd);
 
-    let next_client_id = next_client_id();
-
-    info!("next_client_id = {}", next_client_id);
-
-    let state = State::new(
-        cwd,
-        cli.graffitiignore,
-        is_host,
-        next_client_id,
-        writer_tx.clone(),
-    );
-
-    info!("my client id is {}", state.lock().await.client_id);
+    let state = State::new(cwd, cli.graffitiignore, is_host, writer_tx.clone());
 
     let network_handle = match cli.command {
         Commands::Host { authorized_keys } => {
             info!("Starting host mode");
+
+            let next_client_id = next_client_id();
+            info!("my client id is {}", next_client_id);
+            state.lock().await.set_client_id(next_client_id);
+
             tokio::spawn(run_host(
                 state.clone(),
                 send_to_main,
@@ -539,7 +532,7 @@ mod tests {
             &method,
             &content,
             &sender,
-            State::new(PathBuf::new(), None, true, next_client_id(), writer_tx),
+            State::new(PathBuf::new(), None, true, writer_tx),
         )
         .await
         .unwrap();

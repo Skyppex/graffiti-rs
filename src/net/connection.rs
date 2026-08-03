@@ -29,7 +29,7 @@ use tokio_tungstenite::{
     Connector, MaybeTlsStream, WebSocketStream,
 };
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::{DynError, DynResult};
 
@@ -155,7 +155,7 @@ fn generate_cert(public_ip: String) -> CertData {
     }
 }
 
-fn compute_fingerprint(data: &[u8], connection_string: &[u8]) -> String {
+fn compute_token(data: &[u8], connection_string: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
     let result = hasher.finalize();
@@ -168,14 +168,7 @@ fn compute_fingerprint(data: &[u8], connection_string: &[u8]) -> String {
     hex::encode(result)
 }
 
-fn compute_fingerprint_raw(data: &[u8], connection_string: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    hasher.update(connection_string);
-    hex::encode(hasher.finalize())
-}
-
-fn compute_fingerprint_simple(data: &[u8]) -> Vec<u8> {
+fn compute_token_simple(data: &[u8]) -> Vec<u8> {
     let mut hasher = Sha256::new();
     hasher.update(data);
     hasher.finalize().to_vec()
@@ -194,7 +187,7 @@ fn load_authorized_keys(path: &std::path::Path) -> DynResult<Vec<Vec<u8>>> {
         let fingerprint = if line.starts_with("ssh-") {
             let key = ssh_key::PublicKey::from_openssh(line)
                 .map_err(|e| format!("failed to parse public key: {}", e))?;
-            compute_fingerprint_simple(key.to_bytes()?.as_ref())
+            compute_token_simple(key.to_bytes()?.as_ref())
         } else if line.len() == 64 && line.chars().all(|c| c.is_ascii_hexdigit()) {
             hex::decode(line)?
         } else {
@@ -210,7 +203,7 @@ fn load_authorized_keys(path: &std::path::Path) -> DynResult<Vec<Vec<u8>>> {
 impl Connection {
     pub async fn host<F, Fut>(
         mode: ConnectionMode,
-        fingerprint_generated: F,
+        token_generated: F,
         authorized_keys_path: Option<std::path::PathBuf>,
     ) -> DynResult<Self>
     where
@@ -234,9 +227,9 @@ impl Connection {
                 };
 
                 let connection_string = [b"ws://".to_vec(), octets].concat();
-                let fingerprint = compute_fingerprint(&cert_data.certs[0], &connection_string);
+                let token = compute_token(&cert_data.certs[0], &connection_string);
 
-                fingerprint_generated(fingerprint.clone()).await?;
+                token_generated(token.clone()).await?;
 
                 let tls_config = ServerConfig::builder()
                     .with_no_client_auth()
@@ -262,18 +255,18 @@ impl Connection {
             ConnectionMode::Ssh => {
                 let host = "127.0.0.1".to_string();
 
-                let host_key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)?;
-
                 let connection_string = [b"ssh://".to_vec(), host.as_bytes().to_vec()].concat();
 
-                let fingerprint = compute_fingerprint_raw(
+                let host_key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)?;
+
+                let token = compute_token(
                     host_key.public_key().to_bytes()?.as_ref(),
                     &connection_string,
                 );
 
-                fingerprint_generated(fingerprint.to_string()).await?;
+                token_generated(token.to_string()).await?;
 
-                let uri = "0.0.0.0:32700";
+                let uri = "0.0.0.0:32722";
                 let listener = TcpListener::bind(uri).await?;
                 info!("Listening on {}", uri);
 
@@ -310,21 +303,28 @@ impl Connection {
     }
 
     pub async fn connect(
-        fingerprint_from_out_of_band: String,
+        token_from_out_of_band: String,
         client_key_path: Option<std::path::PathBuf>,
     ) -> DynResult<Self> {
+        debug!("100");
         let client_key = if let Some(path) = client_key_path {
+            debug!("101");
+            debug!("client_key_path: {:?}", &path);
             let content = tokio::fs::read_to_string(&path).await?;
+            debug!("101.1");
             Some(PrivateKey::from_openssh(&content)?)
         } else {
             None
         };
 
+        debug!("102");
         let ip = get_ip().await.unwrap_or_else(|_| "127.0.0.1".to_string());
 
+        debug!("103");
         let (fingerprint, connection_string, connection_mode) = {
-            let decoded = hex::decode(fingerprint_from_out_of_band.clone())?;
+            let decoded = hex::decode(token_from_out_of_band.clone())?;
 
+            info!("aa {}", String::from_utf8_lossy(&decoded));
             let (fingerprint, connection_string) = decoded.split_at(32);
 
             let conn_str = String::from_utf8_lossy(connection_string);
@@ -358,10 +358,7 @@ impl Connection {
             connection_string
         };
 
-        let uri =
-            format!("{}:32700", String::from_utf8_lossy(&connection_string)).parse::<Uri>()?;
-
-        info!("Connecting to {}", uri);
+        let host = format!("{}", String::from_utf8_lossy(&connection_string)).parse::<Uri>()?;
 
         match connection_mode {
             ConnectionMode::Direct => {
@@ -374,8 +371,12 @@ impl Connection {
 
                 let tls_connector = Connector::Rustls(Arc::new(tls_config));
 
+                let address = format!("{}:32700", host);
+                info!("Connecting to {}", address);
+
                 let (ws_stream, _) =
-                    connect_async_tls_with_config(uri, None, false, Some(tls_connector)).await?;
+                    connect_async_tls_with_config(address, None, false, Some(tls_connector))
+                        .await?;
 
                 Ok(Connection::DirectClient(ws_stream))
             }
@@ -383,11 +384,11 @@ impl Connection {
                 let ssh_config = client::Config::default();
                 let ssh_handler = ClientFlow {
                     connection_string,
-                    expected_fingerprint_hex: fingerprint_from_out_of_band,
+                    expected_fingerprint_hex: token_from_out_of_band,
                 };
 
-                let host = uri.host().ok_or("missing host")?;
-                let address = format!("{}:32700", host);
+                let host = host.host().ok_or("missing host")?;
+                let address = format!("{}:32722", host);
 
                 info!("creating ssh session on {}", &address);
 
@@ -656,7 +657,7 @@ impl server::Handler for ServerFlow {
         }
 
         let key_bytes = public_key.to_bytes().map_err(|e| e.to_string())?;
-        let key_fingerprint = compute_fingerprint_simple(key_bytes.as_ref());
+        let key_fingerprint = compute_token_simple(key_bytes.as_ref());
 
         if self.authorized_keys.iter().any(|f| f == &key_fingerprint) {
             Ok(russh::server::Auth::Accept)
@@ -687,7 +688,7 @@ impl client::Handler for ClientFlow {
         &mut self,
         server_public_key: &ssh_key::PublicKey,
     ) -> Result<bool, Self::Error> {
-        let computed = compute_fingerprint_raw(
+        let computed = compute_token(
             server_public_key.to_bytes()?.as_ref(),
             &self.connection_string,
         );
