@@ -1,4 +1,9 @@
-use std::{future::Future, net::IpAddr, str::FromStr, sync::Arc};
+use std::{
+    future::Future,
+    net::{IpAddr, Ipv4Addr},
+    str::FromStr,
+    sync::Arc,
+};
 
 use base64::Engine;
 use futures_util::{
@@ -144,6 +149,42 @@ async fn get_ip() -> DynResult<String> {
     Ok(reqwest::get("https://api.ipify.org").await?.text().await?)
 }
 
+/// The address the default route sends our packets from. On a machine with a
+/// public IP bound directly to an interface (e.g. a VPS) this IS the public IP.
+/// No packets are sent: connecting a UDP socket only selects the route.
+fn local_outbound_ip() -> Option<IpAddr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:53").ok()?;
+    socket.local_addr().ok().map(|addr| addr.ip())
+}
+
+fn is_global_v4(ip: &Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    // 100.64.0.0/10 is carrier-grade NAT space
+    let is_cgnat = octets[0] == 100 && (64..128).contains(&octets[1]);
+
+    !(ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || ip.is_documentation()
+        || is_cgnat)
+}
+
+/// The address peers can reach us on: a globally routable address on one of our
+/// own interfaces when we have one, otherwise whatever the outside world sees us
+/// as, otherwise loopback (offline/local-only).
+async fn resolve_public_ip() -> String {
+    if let Some(IpAddr::V4(ip)) = local_outbound_ip() {
+        if is_global_v4(&ip) {
+            return ip.to_string();
+        }
+    }
+
+    get_ip().await.unwrap_or_else(|_| "127.0.0.1".to_string())
+}
+
 fn generate_cert(public_ip: String) -> CertData {
     let CertifiedKey { cert, key_pair } =
         rcgen::generate_simple_self_signed(vec![public_ip]).unwrap();
@@ -253,7 +294,7 @@ impl Connection {
                 Ok(Connection::DirectHost(ws_stream))
             }
             ConnectionMode::Ssh => {
-                let host = "127.0.0.1".to_string();
+                let host = resolve_public_ip().await;
 
                 let connection_string = [b"ssh://".to_vec(), host.as_bytes().to_vec()].concat();
 
@@ -317,8 +358,6 @@ impl Connection {
             })?;
         let client_key = PrivateKey::from_openssh(&content)?;
 
-        let ip = get_ip().await.unwrap_or_else(|_| "127.0.0.1".to_string());
-
         let (fingerprint, connection_string, connection_mode) = {
             let decoded =
                 base64::prelude::BASE64_STANDARD.decode(token_from_out_of_band.clone())?;
@@ -347,12 +386,6 @@ impl Connection {
             } else {
                 return Err(format!("unsupported protocol: {:?}", conn_uri.scheme_str()).into());
             }
-        };
-
-        let connection_string = if connection_string == ip.as_bytes().to_vec() {
-            b"127.0.0.1".to_vec()
-        } else {
-            connection_string
         };
 
         let host = format!("{}", String::from_utf8_lossy(&connection_string)).parse::<Uri>()?;
@@ -385,6 +418,16 @@ impl Connection {
                 };
 
                 let host = host.host().ok_or("missing host")?;
+
+                // A host advertising our own public address is on this side of the
+                // NAT; dial loopback since hairpinning rarely works. The hash check
+                // still runs against the token's original connection string.
+                let host = if host == resolve_public_ip().await {
+                    "127.0.0.1"
+                } else {
+                    host
+                };
+
                 let address = format!("{}:32722", host);
 
                 info!("creating ssh session on {}", &address);
