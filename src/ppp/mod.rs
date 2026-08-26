@@ -1,16 +1,12 @@
-pub mod receive;
-pub mod send;
-
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::csp;
-
-pub trait Req {
-    fn id(&self) -> String;
-    fn method(&self) -> String;
-}
+use crate::{
+    csp, rpc,
+    session::peer::{PeerMessage, PppNotification, PppRequest, PppResponse},
+    DynResult,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request<T> {
@@ -19,19 +15,12 @@ pub struct Request<T> {
     pub params: Option<T>,
 }
 
-impl<T> Req for Request<T> {
-    fn id(&self) -> String {
-        self.id.clone()
-    }
-
-    fn method(&self) -> String {
-        self.method.clone()
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Response<T> {
     pub id: String,
+    // unlike LSP-style responses, PPP responses carry their method so they
+    // can be decoded without correlating against the originating request
+    pub method: String,
     pub result: Option<T>,
     // pub error: (),
 }
@@ -99,12 +88,6 @@ pub struct DocumentLocation {
 pub struct DocumentPosition {
     pub line: u32,
     pub column: u32,
-}
-
-impl DocumentLocation {
-    pub fn exists(&self) -> bool {
-        self.uri.is_file()
-    }
 }
 
 impl From<csp::DocumentLocation> for DocumentLocation {
@@ -182,4 +165,168 @@ pub enum DirectoryType {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InitialFileNotification {
     pub uri: PathBuf,
+}
+
+// ─── wire codec ──────────────────────────────────────────────────────────
+// The link tasks in `net` are the only callers: they decode every frame read
+// from the wire into a typed PeerMessage before it reaches the session, and
+// encode every PeerMessage the session emits.
+
+pub async fn decode(data: &[u8]) -> DynResult<PeerMessage> {
+    let info = rpc::decode_message(data).await?;
+
+    let is_response = serde_json::from_slice::<serde_json::Value>(&info.content)
+        .ok()
+        .map(|value| value.get("result").is_some())
+        .unwrap_or(false);
+
+    match (info.id, info.method, is_response) {
+        (Some(req_id), Some(method), true) => {
+            let response = match method.as_str() {
+                "initialize" => PppResponse::Initialize(rpc::decode_result(&info.content)?),
+                other => return Err(format!("unknown response method: {}", other).into()),
+            };
+
+            Ok(PeerMessage::Response { req_id, response })
+        }
+        (Some(req_id), Some(method), false) => {
+            let request = match method.as_str() {
+                "initialize" => PppRequest::Initialize(rpc::decode_params(&info.content)?),
+                other => return Err(format!("unknown request method: {}", other).into()),
+            };
+
+            Ok(PeerMessage::Request { req_id, request })
+        }
+        (None, Some(method), _) => Ok(PeerMessage::Notification(decode_notification(
+            &method,
+            &info.content,
+        )?)),
+        _ => Err("a message must carry a method".into()),
+    }
+}
+
+fn decode_notification(method: &str, content: &[u8]) -> DynResult<PppNotification> {
+    match method {
+        "initialized" => Ok(PppNotification::Initialized(rpc::decode_params(content)?)),
+        "directories/upload" => Ok(PppNotification::DirectoriesUpload(rpc::decode_params(
+            content,
+        )?)),
+        "initial_file_uri" => Ok(PppNotification::InitialFileUri(rpc::decode_params(
+            content,
+        )?)),
+        "cursor_moved" => Ok(PppNotification::CursorMoved(rpc::decode_params(content)?)),
+        "document/edit" => {
+            let mode: DocumentEditModeNotification = rpc::decode_params(content)?;
+
+            match mode.mode {
+                DocumentEditMode::Full => Ok(PppNotification::DocumentEditFull(
+                    rpc::decode_params(content)?,
+                )),
+                DocumentEditMode::Incremental => {
+                    todo!("incremental edits not implemented yet")
+                }
+            }
+        }
+        other => Err(format!("unknown notification method: {}", other).into()),
+    }
+}
+
+pub fn encode(message: &PeerMessage) -> DynResult<Vec<u8>> {
+    match message {
+        PeerMessage::Request { req_id, request } => match request {
+            PppRequest::Initialize(params) => rpc::encode(Request {
+                id: req_id.clone(),
+                method: "initialize".into(),
+                params: Some(params.clone()),
+            }),
+        },
+        PeerMessage::Response { req_id, response } => match response {
+            PppResponse::Initialize(result) => rpc::encode(Response {
+                id: req_id.clone(),
+                method: "initialize".into(),
+                result: Some(result.clone()),
+            }),
+        },
+        PeerMessage::Notification(notification) => encode_notification(notification),
+    }
+}
+
+fn encode_notification(notification: &PppNotification) -> DynResult<Vec<u8>> {
+    match notification {
+        PppNotification::Initialized(params) => rpc::encode(Notification {
+            method: "initialized".to_string(),
+            params: Some(params.clone()),
+        }),
+        PppNotification::DirectoriesUpload(params) => rpc::encode(Notification {
+            method: "directories/upload".to_string(),
+            params: Some(params.clone()),
+        }),
+        PppNotification::InitialFileUri(params) => rpc::encode(Notification {
+            method: "initial_file_uri".to_string(),
+            params: Some(params.clone()),
+        }),
+        PppNotification::CursorMoved(params) => rpc::encode(Notification {
+            method: "cursor_moved".to_string(),
+            params: Some(params.clone()),
+        }),
+        PppNotification::DocumentEditFull(params) => rpc::encode(Notification {
+            method: "document/edit".to_string(),
+            params: Some(params.clone()),
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn notification_roundtrip() {
+        let original = PeerMessage::Notification(PppNotification::CursorMoved(
+            CursorMovedNotification {
+                client_id: "2".into(),
+                location: DocumentLocation {
+                    uri: PathBuf::from("src/main.rs"),
+                    pos: DocumentPosition { line: 4, column: 7 },
+                },
+            },
+        ));
+
+        let decoded = decode(&encode(&original).unwrap()).await.unwrap();
+
+        match decoded {
+            PeerMessage::Notification(PppNotification::CursorMoved(params)) => {
+                assert_eq!(params.client_id, "2");
+                assert_eq!(params.location.pos.line, 4);
+                assert_eq!(params.location.pos.column, 7);
+            }
+            other => panic!("expected a cursor move, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn response_roundtrip() {
+        let original = PeerMessage::Response {
+            req_id: "42".into(),
+            response: PppResponse::Initialize(InitializeResponse {
+                host_info: None,
+                client_id: "3".into(),
+                project_dir_name: PathBuf::from("graffiti-rs"),
+            }),
+        };
+
+        let decoded = decode(&encode(&original).unwrap()).await.unwrap();
+
+        match decoded {
+            PeerMessage::Response {
+                req_id,
+                response: PppResponse::Initialize(result),
+            } => {
+                assert_eq!(req_id, "42");
+                assert_eq!(result.client_id, "3");
+                assert_eq!(result.project_dir_name, PathBuf::from("graffiti-rs"));
+            }
+            other => panic!("expected an initialize response, got {:?}", other),
+        }
+    }
 }

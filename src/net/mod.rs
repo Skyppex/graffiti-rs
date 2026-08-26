@@ -1,36 +1,29 @@
 pub mod connection;
-pub mod receive;
-pub mod send;
 
-use std::sync::Arc;
-
-use tokio::sync::{
-    mpsc::{Receiver, Sender},
-    Mutex,
-};
+use tokio::sync::mpsc;
 use tracing::info;
 
 use crate::{
+    id::next_client_id,
     net::connection::{Connection, ConnectionMode, Message},
     ppp,
-    state::State,
+    session::{
+        peer::{PeerId, PeerMessage},
+        SessionEvent, SessionHandle,
+    },
     DynResult,
 };
 
 pub async fn run_host(
-    state: Arc<Mutex<State>>,
-    sender: Sender<send::Message>,
-    mut receiver: Receiver<receive::Message>,
+    session: SessionHandle,
     authorized_keys_path: std::path::PathBuf,
 ) -> DynResult<()> {
     info!("connecting...");
-    let stream = Connection::host(
+    let connection = Connection::host(
         ConnectionMode::Ssh,
         async |fingerprint| {
             info!("Fingerprint: {}", &fingerprint);
-
-            sender.send(send::Message::Fingerprint(fingerprint)).await?;
-            Ok(())
+            session.send(SessionEvent::Fingerprint(fingerprint)).await
         },
         authorized_keys_path,
     )
@@ -38,107 +31,74 @@ pub async fn run_host(
 
     info!("connection established");
 
-    let (mut writer, mut reader) = stream.split();
-
-    let mut shutdown_id = None;
-
-    loop {
-        tokio::select! {
-            // Handle websocket messages
-            Some(msg) = reader.next() => {
-                info!("Received from client: {:?}", msg);
-
-                if msg.is_err() {
-                    break;
-                }
-
-                let msg = msg?;
-
-                if let Message::Close = msg {
-                    info!("Client disconnected");
-                    break;
-                }
-
-                ppp::receive::handle_message(msg, state.clone(), &mut writer, &sender).await?;
-            }
-            // Handle channel messages
-            Some(msg) = receiver.recv() => {
-                info!("Received from main: {}", msg);
-
-                if let receive::Message::Shutdown(id) = msg {
-                    info!("Shutting down");
-                    writer.send(Message::Close).await?;
-                    shutdown_id = Some(id);
-                } else {
-                    receive::handle_message(msg, state.clone(), &mut writer).await?;
-                }
-            }
-        }
-    }
-
-    info!("Websocket connection closed");
-    writer.close().await?;
-    info!("closed websocket sink");
-    sender.send(send::Message::Shutdown(shutdown_id)).await?;
-    info!("shutdown sent to main");
-
-    Ok(())
+    // the host allocates the client_id at accept time, so the link and the
+    // author it carries share one identity from the first frame
+    run_link(PeerId::Client(next_client_id()), connection, &session).await
 }
 
 pub async fn run_client(
     fingerprint: String,
-    state: Arc<Mutex<State>>,
-    sender: Sender<send::Message>,
-    mut receiver: Receiver<receive::Message>,
+    session: SessionHandle,
     client_key_path: std::path::PathBuf,
 ) -> DynResult<()> {
-    let stream = Connection::connect(fingerprint, client_key_path).await?;
+    let connection = Connection::connect(fingerprint, client_key_path).await?;
 
-    let (mut writer, mut reader) = stream.split();
+    run_link(PeerId::Host, connection, &session).await
+}
 
-    ppp::send::initialize(state.clone(), &mut writer).await?;
+/// Owns one connection for its whole life: decodes every inbound frame into
+/// the session's inbox, drains the session's outbound channel onto the wire.
+/// The session closing that channel (dropping the peer) is the close signal.
+async fn run_link(id: PeerId, connection: Connection, session: &SessionHandle) -> DynResult<()> {
+    let (mut writer, mut reader) = connection.split();
+    let (tx, mut rx) = mpsc::channel::<PeerMessage>(8);
 
-    let mut shutdown_id = None;
+    session
+        .send(SessionEvent::PeerConnected(id.clone(), tx))
+        .await?;
 
     loop {
         tokio::select! {
-            // Handle incoming messages
-            Some(msg) = reader.next() => {
-                info!("Received from host");
-
-                if msg.is_err() {
-                    break;
+            inbound = reader.next() => {
+                match inbound {
+                    Some(Ok(Message::Data(data))) => match ppp::decode(&data).await {
+                        Ok(message) => {
+                            session
+                                .send(SessionEvent::FromPeer(id.clone(), message))
+                                .await?
+                        }
+                        Err(e) => info!("failed to decode peer message: {}", e),
+                    },
+                    Some(Ok(Message::Close)) => {
+                        info!("peer closed the connection");
+                        break;
+                    }
+                    Some(Err(e)) => {
+                        info!("connection error: {}", e);
+                        break;
+                    }
+                    None => break,
                 }
-
-                let msg = msg?;
-
-                if let Message::Close = msg {
-                    info!("Disconnected by server");
-                    break;
-                }
-
-                ppp::receive::handle_message(msg, state.clone(), &mut writer, &sender).await?;
             }
-            // Handle channel messages
-            Some(msg) = receiver.recv() => {
-                info!("Received from main: {}", msg);
-
-                if let receive::Message::Shutdown(id) = msg {
-                    info!("Shutting down");
-                    writer.send(Message::Close).await?;
-                    shutdown_id = Some(id);
-                } else {
-                    receive::handle_message(msg, state.clone(), &mut writer).await?;
+            outbound = rx.recv() => {
+                match outbound {
+                    Some(message) => {
+                        writer.send(Message::Data(ppp::encode(&message)?)).await?
+                    }
+                    // the session dropped our sender: close the link gracefully
+                    None => {
+                        writer.send(Message::Close).await?;
+                        break;
+                    }
                 }
             }
         }
     }
 
-    info!("Websocket connection closed");
     writer.close().await?;
-    info!("closed websocket sink");
-    sender.send(send::Message::Shutdown(shutdown_id)).await?;
-    info!("shutdown sent to main");
+    info!("link closed");
+
+    session.send(SessionEvent::PeerDisconnected(id)).await?;
 
     Ok(())
 }

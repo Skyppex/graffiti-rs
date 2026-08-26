@@ -5,42 +5,29 @@ use std::{
     sync::Arc,
 };
 
-use tokio::sync::{mpsc::Sender, Mutex};
+use tokio::sync::Mutex;
 use twox_hash::XxHash64;
 
 use crate::{csp, ppp};
-
-pub type Request = dyn crate::ppp::Req + Send;
 
 pub struct State {
     cwd: PathBuf,
     custom_ignore_file: Option<PathBuf>,
     remote_projects_path: Option<PathBuf>,
-    is_host: bool,
     pub client_id: String,
     pub fingerprint: Option<String>,
-    pub writer_tx: Sender<Vec<u8>>,
-    network_requests: HashMap<String, Box<Request>>,
     client_locations: HashMap<String, DocumentLocation>,
     file_hashes: HashMap<PathBuf, u64>,
 }
 
 impl State {
-    pub fn new(
-        cwd: PathBuf,
-        custom_ignore_file: Option<PathBuf>,
-        is_host: bool,
-        writer_tx: Sender<Vec<u8>>,
-    ) -> Arc<Mutex<Self>> {
+    pub fn new(cwd: PathBuf, custom_ignore_file: Option<PathBuf>) -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(State {
             cwd,
             custom_ignore_file,
             remote_projects_path: None,
-            is_host,
             client_id: "0".to_owned(),
             fingerprint: None,
-            writer_tx,
-            network_requests: HashMap::new(),
             client_locations: HashMap::new(),
             file_hashes: HashMap::new(),
         }))
@@ -48,14 +35,6 @@ impl State {
 
     pub fn set_client_id(&mut self, client_id: String) {
         self.client_id = client_id;
-    }
-
-    pub fn _is_host(&self) -> bool {
-        self.is_host
-    }
-
-    pub fn is_client(&self) -> bool {
-        !self.is_host
     }
 
     pub fn get_cwd(&self) -> PathBuf {
@@ -91,18 +70,6 @@ impl State {
 
     pub fn set_fingerprint(&mut self, fingerprint: String) {
         self.fingerprint = Some(fingerprint);
-    }
-
-    pub fn _get_net_req(&mut self, req_id: &str) -> Option<&Request> {
-        self.network_requests.get(req_id).map(|r| r.as_ref())
-    }
-
-    pub fn add_net_req(&mut self, req: Box<Request>) -> Option<Box<Request>> {
-        self.network_requests.insert(req.id(), req)
-    }
-
-    pub fn remove_net_req(&mut self, req_id: &str) -> Option<Box<Request>> {
-        self.network_requests.remove(req_id)
     }
 
     pub fn _get_client_location(&self, client_id: &str) -> Option<&DocumentLocation> {

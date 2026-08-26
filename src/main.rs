@@ -6,30 +6,24 @@ mod net;
 mod path_utils;
 mod ppp;
 mod rpc;
+mod session;
 mod state;
 
-use std::{error::Error, process, sync::Arc};
-
-use csp::{
-    FingerprintGeneratedNotification, InitializeOptions, InitializeResponse, LocationRequest,
-    Notification, Request, Response, ShutdownRequest, ShutdownResponse,
-};
+use std::{error::Error, process};
 
 use clap::Parser;
 use cli::{Cli, Commands};
 use id::next_client_id;
-use net::{run_client, run_host};
+use session::{
+    editor::{EditorInbound, EditorOutbound},
+    Role, Session, SessionEvent, SessionHandle,
+};
 use state::State;
 use tokio::{
-    io::{self, AsyncRead, AsyncWriteExt, BufReader},
-    sync::{
-        mpsc::{self, Sender},
-        Mutex,
-    },
+    io::{self, AsyncWriteExt, BufReader},
+    sync::mpsc,
 };
 use tracing::info;
-
-use crate::{id::next_request_id, net::send::Message};
 
 type DynError = Box<dyn Error + Send + Sync>;
 type DynResult<T> = Result<T, DynError>;
@@ -44,114 +38,61 @@ async fn main() -> DynResult<()> {
 
     let is_host = matches!(cli.command, Commands::Host { .. });
 
-    let (send_to_main, mut receive_from_thread) = mpsc::channel::<net::send::Message>(8);
-    let (send_to_thread, receive_from_main) = mpsc::channel::<net::receive::Message>(8);
-
-    let (writer_tx, mut writer_rx) = mpsc::channel::<Vec<u8>>(8);
+    let (writer_tx, mut writer_rx) = mpsc::channel::<EditorOutbound>(8);
 
     let cwd = std::env::current_dir()?;
 
     info!("Current working directory: {:?}", cwd);
 
-    let state = State::new(cwd, cli.graffitiignore, is_host, writer_tx.clone());
+    let state = State::new(cwd, cli.graffitiignore);
+
+    let role = if is_host { Role::Host } else { Role::Client };
+    let (session, handle) = Session::new(role, state.clone(), writer_tx.clone());
+    let session_handle = tokio::spawn(session.run());
 
     let network_handle = match cli.command {
         Commands::Host { authorized_keys } => {
             info!("Starting host mode");
 
-            let next_client_id = next_client_id();
-            info!("my client id is {}", next_client_id);
-            state.lock().await.set_client_id(next_client_id);
+            let my_client_id = next_client_id();
+            info!("my client id is {}", my_client_id);
+            state.lock().await.set_client_id(my_client_id);
 
-            tokio::spawn(run_host(
-                state.clone(),
-                send_to_main,
-                receive_from_main,
-                authorized_keys,
-            ))
+            tokio::spawn(net::run_host(handle.clone(), authorized_keys))
         }
         Commands::Connect { sha, client_key } => {
             info!("Starting client mode");
-            tokio::spawn(run_client(
-                sha,
-                state.clone(),
-                send_to_main,
-                receive_from_main,
-                client_key,
-            ))
+            tokio::spawn(net::run_client(sha, handle.clone(), client_key))
         }
     };
 
+    // the outbound half of the editor endpoint: encodes what the session
+    // emits and writes it to stdout
     let writer_handle = tokio::spawn(async move {
         let mut writer = io::stdout();
-        while let Some(data) = writer_rx.recv().await {
-            if writer.write_all(&data).await.is_err() {
-                break;
+        while let Some(message) = writer_rx.recv().await {
+            match csp::encode(message) {
+                Ok(data) => {
+                    if writer.write_all(&data).await.is_err() {
+                        break;
+                    }
+                }
+                Err(e) => info!("Failed to encode editor message: {}", e),
             }
         }
         info!("Writer task exited");
     });
 
-    let (network_shutdown_tx, mut network_shutdown_rx) = mpsc::channel(1);
+    let editor_handle = tokio::spawn(run_editor(handle));
 
-    let network_writer_tx = writer_tx.clone();
-    let network_state = state.clone();
-    let network_handler_handle = tokio::spawn(async move {
-        let mut shutting_down = false;
-        while let Some(message) = receive_from_thread.recv().await {
-            match handle_network_message(message, network_writer_tx.clone(), network_state.clone())
-                .await
-            {
-                Ok(result) => {
-                    if result.should_shutdown {
-                        shutting_down = true;
-                    }
-                }
-                Err(e) => {
-                    info!("Error handling network message: {}", e);
-                }
-            }
-        }
-        let _ = network_shutdown_tx.send(()).await;
-        shutting_down
-    });
+    // the session loop is the program: when it ends, we're done
+    let shutting_down = session_handle.await.unwrap_or(false);
 
-    let stdin = io::stdin();
-    let mut scanner = BufReader::new(stdin);
+    editor_handle.abort();
+    network_handle.abort();
 
-    info!("Entering main message loop");
-
-    let mut shutting_down = false;
-
-    let main_state = state.clone();
-
-    loop {
-        tokio::select! {
-            result = network_shutdown_rx.recv() => {
-                if result.is_some() {
-                    shutting_down = true;
-                }
-                break;
-            }
-            Ok(HandledMessage {
-                should_exit,
-            }) = handle_input(&mut scanner, &send_to_thread, main_state.clone()) => {
-                if should_exit {
-                    break;
-                }
-            }
-        }
-    }
-
-    let shutting_down = shutting_down || network_handler_handle.await.unwrap_or(false);
-
-    match network_handle.await? {
-        Ok(_) => {}
-        Err(e) => {
-            info!("Network thread exited with error: {}", e);
-        }
-    }
-
+    // every other writer_tx clone is gone once the session has returned, so
+    // this closes the channel and lets the writer task drain and exit
     drop(writer_tx);
     writer_handle.await?;
 
@@ -164,421 +105,44 @@ async fn main() -> DynResult<()> {
     }
 }
 
-async fn handle_input(
-    scanner: &mut BufReader<impl AsyncRead + Unpin>,
-    sender: &Sender<net::receive::Message>,
-    state: Arc<Mutex<State>>,
-) -> DynResult<HandledMessage> {
-    info!("Handling input from editor");
-    let decoded = rpc::decode(scanner).await?;
+/// The editor endpoint: reads CSP messages from stdin and forwards them,
+/// decoded, into the session's inbox.
+async fn run_editor(session: SessionHandle) {
+    let stdin = io::stdin();
+    let mut scanner = BufReader::new(stdin);
 
-    info!("Handling editor method: {}", decoded.method);
+    info!("Entering editor message loop");
 
-    info!("Content: {:?}", String::from_utf8(decoded.content.clone()));
-
-    handle_message(decoded.id, &decoded.method, &decoded.content, sender, state).await
-}
-
-async fn handle_message(
-    id: Option<String>,
-    method: &str,
-    content: &[u8],
-    sender: &Sender<net::receive::Message>,
-    state: Arc<Mutex<State>>,
-) -> DynResult<HandledMessage> {
-    let writer_tx = state.lock().await.writer_tx.clone();
-
-    match method {
-        "initialize" => {
-            let params = rpc::decode_params::<csp::InitializeRequest>(content)?;
-
-            let mut state = state.lock().await;
-
-            if let Some(InitializeOptions {
-                client_projects_root: Some(client_projects_root),
-            }) = params.initialize_options
-            {
-                if state.is_client() {
-                    state.set_cwd(client_projects_root);
-                }
+    loop {
+        let decoded = match rpc::decode(&mut scanner).await {
+            Ok(decoded) => decoded,
+            Err(e) => {
+                info!("Editor input closed: {}", e);
+                let _ = session.send(SessionEvent::EditorClosed).await;
+                break;
             }
-
-            info!("Received initialize message from editor");
-
-            let response = rpc::encode(Response::<InitializeResponse> {
-                id: id.expect("Request ID is missing"),
-                result: Some(InitializeResponse {
-                    server_info: Some(csp::ServerInfo {
-                        name: "graffiti-rs".to_string(),
-                        version: Some("0.1.0".to_string()),
-                    }),
-                    client_id: state.client_id.clone(),
-                }),
-            })?;
-
-            writer_tx.send(response).await?;
-
-            Ok(HandledMessage { should_exit: false })
-        }
-        "move_cursor" => {
-            info!("Received move_cursor message from editor");
-
-            let params = rpc::decode_params::<csp::MoveCursorNotification>(content)?;
-
-            if !params.location.exists() {
-                return Ok(HandledMessage { should_exit: false });
-            }
-
-            state.lock().await.set_my_location(params.location.clone());
-
-            sender
-                .send(net::receive::Message::CursorMoved {
-                    location: params.location.into(),
-                })
-                .await?;
-
-            Ok(HandledMessage { should_exit: false })
-        }
-        "document/edit" => {
-            info!("Received document/edit message from editor");
-
-            let request = rpc::decode_params::<csp::DocumentEditModeNotification>(content)?;
-
-            match request.mode {
-                csp::DocumentEditMode::Full => {
-                    let params = rpc::decode_params::<csp::DocumentEditFull>(content);
-
-                    let params = params?;
-
-                    let mut state = state.lock().await;
-
-                    if let Ok(true) = tokio::fs::try_exists(state.get_cwd().join(&params.uri)).await
-                    {
-                        if let Some(true) = state.file_equals(&params.uri, &params.content) {
-                            return Ok(HandledMessage { should_exit: false });
-                        } else {
-                            state.set_file(params.uri.clone(), &params.content);
-                        }
-
-                        sender
-                            .send(net::receive::Message::DocumentEditFull {
-                                uri: params.uri,
-                                content: params.content,
-                            })
-                            .await?;
-                    } else {
-                        info!("153 File doesn't exist");
-                    }
-                }
-                csp::DocumentEditMode::Incremental => {
-                    todo!("154 incremental edits not implemented yet")
-                }
-            }
-
-            Ok(HandledMessage { should_exit: false })
-        }
-        "initialized" => {
-            info!("Received initialized message from editor");
-
-            let request = rpc::encode(Request::<LocationRequest> {
-                id: Some(next_request_id()),
-                method: "document/location".into(),
-                params: None,
-            })?;
-
-            writer_tx.send(request).await?;
-
-            Ok(HandledMessage { should_exit: false })
-        }
-        "document/location" => {
-            info!("Received document/location message from editor");
-
-            let params = rpc::decode_params::<csp::LocationResponse>(content)?;
-            info!("50 {:?}", params);
-
-            state.lock().await.set_my_location(params.location);
-
-            Ok(HandledMessage { should_exit: false })
-        }
-        "cwd_changed" => {
-            info!("Received cwd_changed message from editor");
-
-            Ok(HandledMessage { should_exit: false })
-        }
-        "request_fingerprint" => {
-            info!("Received fingerprint message from editor");
-
-            let response = rpc::encode(Response::<csp::FingerprintResponse> {
-                id: id.expect("Request ID is missing"),
-                result: Some(csp::FingerprintResponse {
-                    fingerprint: state
-                        .lock()
-                        .await
-                        .fingerprint
-                        .clone()
-                        .unwrap_or("No fingerprint".to_string()),
-                }),
-            })?;
-
-            writer_tx.send(response).await?;
-
-            Ok(HandledMessage { should_exit: false })
-        }
-        "shutdown" => {
-            info!("Received shutdown message from editor");
-
-            sender
-                .send(net::receive::Message::Shutdown(
-                    id.expect("Request ID is missing"),
-                ))
-                .await?;
-
-            info!("Sent shutdown message through channel");
-
-            Ok(HandledMessage { should_exit: false })
-        }
-        "exit" => {
-            info!("Received shutdown message from editor");
-            Ok(HandledMessage { should_exit: true })
-        }
-        _ => {
-            info!("Received unknown message from editor");
-            let response = rpc::encode("unknown method").unwrap();
-            writer_tx.send(response).await?;
-
-            Ok(HandledMessage { should_exit: false })
-        }
-    }
-}
-
-async fn handle_network_message(
-    message: Message,
-    writer_tx: Sender<Vec<u8>>,
-    state: Arc<Mutex<State>>,
-) -> DynResult<HandledNetworkMessage> {
-    info!("Received from network: {}", message);
-
-    match message {
-        net::send::Message::Shutdown(Some(id)) => {
-            let response = rpc::encode(Response::<ShutdownResponse> { id, result: None })?;
-
-            info!("Sending shutdown response to editor");
-            writer_tx.send(response).await?;
-            info!("Sent shutdown response to editor");
-
-            Ok(HandledNetworkMessage {
-                should_shutdown: true,
-            })
-        }
-        net::send::Message::Shutdown(None) => {
-            let request = rpc::encode(Request::<ShutdownRequest> {
-                id: None,
-                method: "shutdown".into(),
-                params: None,
-            })?;
-
-            info!("Sending shutdown request to editor");
-            writer_tx.send(request).await?;
-            info!("Sent shutdown request to editor");
-
-            Ok(HandledNetworkMessage {
-                should_shutdown: true,
-            })
-        }
-        net::send::Message::Fingerprint(fingerprint) => {
-            state.lock().await.set_fingerprint(fingerprint.clone());
-
-            let notification = rpc::encode(Notification::<FingerprintGeneratedNotification> {
-                method: "fingerprint_generated".into(),
-                params: Some(FingerprintGeneratedNotification { fingerprint }),
-            })?;
-
-            writer_tx.send(notification).await?;
-
-            Ok(HandledNetworkMessage {
-                should_shutdown: false,
-            })
-        }
-        net::send::Message::InitialFileUri { uri } => {
-            info!(
-                "200 Received initial file URI: {:?} CWD: {:?}",
-                uri,
-                state.lock().await.get_cwd()
-            );
-
-            let request = rpc::encode(Request::<csp::InitialFileUriRequest> {
-                id: Some(next_request_id()),
-                method: "initial_file_uri".into(),
-                params: Some(csp::InitialFileUriRequest {
-                    cwd: state.lock().await.get_cwd(),
-                    initial_file_uri: uri,
-                }),
-            })?;
-
-            writer_tx.send(request).await?;
-
-            Ok(HandledNetworkMessage {
-                should_shutdown: false,
-            })
-        }
-        net::send::Message::ClientInitialized(client_id) => {
-            let state = state.lock().await;
-
-            if state.is_client() {
-                info!("client initialized received on client: {}", client_id);
-            }
-
-            Ok(HandledNetworkMessage {
-                should_shutdown: false,
-            })
-        }
-        net::send::Message::Initialized(client_id) => {
-            let state = state.lock().await;
-
-            if state.is_client() {
-                info!("initialized received on client: {}", client_id);
-
-                let notification = rpc::encode(Notification::<csp::ClientIdChangedNotification> {
-                    method: "client_id_changed".into(),
-                    params: Some(csp::ClientIdChangedNotification { client_id }),
-                })?;
-
-                writer_tx.send(notification).await?;
-            }
-
-            Ok(HandledNetworkMessage {
-                should_shutdown: false,
-            })
-        }
-        net::send::Message::CursorMoved {
-            client_id,
-            location,
-        } => {
-            let notification = rpc::encode(Notification::<csp::CursorMovedNotification> {
-                method: "cursor_moved".into(),
-                params: Some(csp::CursorMovedNotification {
-                    client_id,
-                    location: location.into(),
-                }),
-            })?;
-
-            writer_tx.send(notification).await?;
-
-            Ok(HandledNetworkMessage {
-                should_shutdown: false,
-            })
-        }
-        net::send::Message::DocumentEditedFull {
-            client_id,
-            uri,
-            content,
-        } => {
-            let uri = state.lock().await.get_cwd().join(uri);
-            let notification = rpc::encode(Notification::<csp::DocumentEditedFull> {
-                method: "document/edited".into(),
-                params: Some(csp::DocumentEditedFull {
-                    client_id,
-                    mode: csp::DocumentEditMode::Full,
-                    uri,
-                    content,
-                }),
-            })?;
-
-            writer_tx.send(notification).await?;
-
-            Ok(HandledNetworkMessage {
-                should_shutdown: false,
-            })
-        }
-        _ => Ok(HandledNetworkMessage {
-            should_shutdown: false,
-        }),
-    }
-}
-
-pub struct HandledMessage {
-    should_exit: bool,
-}
-
-pub struct HandledNetworkMessage {
-    should_shutdown: bool,
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use super::*;
-    use fluid::prelude::*;
-
-    use crate::{
-        csp::{InitializeRequest, InitializeResponse, Request, Response},
-        rpc,
-    };
-
-    async fn test_message(message: Vec<u8>) -> Vec<u8> {
-        let mut reader = BufReader::new(&message[..]);
-        let decoded = rpc::decode(&mut reader).await.expect("invalid request");
-
-        let id = decoded.id;
-        let method = decoded.method;
-        let content = decoded.content;
-
-        let (writer_tx, _) = mpsc::channel(8);
-        let (sender, _) = mpsc::channel(8);
-
-        handle_message(
-            id,
-            &method,
-            &content,
-            &sender,
-            State::new(PathBuf::new(), None, true, writer_tx),
-        )
-        .await
-        .unwrap();
-
-        Vec::new()
-    }
-
-    #[tokio::test]
-    async fn handle_initialize() {
-        // arrange
-        let initialize = Request::<InitializeRequest> {
-            id: Some("1".into()),
-            method: "initialize".into(),
-            params: Some(InitializeRequest {
-                process_id: Some(123),
-                editor_info: Some(crate::csp::EditorInfo {
-                    name: "test-client".to_string(),
-                    version: Some("0.1.0".to_string()),
-                }),
-                root_path: Some(".".to_string()),
-                initialize_options: None,
-            }),
         };
 
-        // act
-        let response = test_message(rpc::encode(initialize).expect("Failed to encode")).await;
+        info!("Handling editor method: {}", decoded.method);
+        info!("Content: {:?}", String::from_utf8(decoded.content.clone()));
 
-        // assert
-        assert_message_eq(
-            response,
-            Response::<InitializeResponse> {
-                id: "1".into(),
-                result: Some(InitializeResponse {
-                    client_id: "0".to_string(),
-                    server_info: Some(crate::csp::ServerInfo {
-                        name: "graffiti-rs".to_string(),
-                        version: Some("0.1.0".to_string()),
-                    }),
-                }),
-            },
-        )
-    }
+        match csp::decode(&decoded) {
+            Ok(message) => {
+                let is_exit = matches!(message, EditorInbound::Exit);
 
-    fn assert_message_eq<T: serde::Serialize>(message: Vec<u8>, expected: T) {
-        let mut bytes = rpc::encode(expected).expect("Failed to encode");
-        bytes.push(b'\n');
-        message.should().be_equal_to(bytes);
+                if session
+                    .send(SessionEvent::FromEditor(message))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+
+                if is_exit {
+                    break;
+                }
+            }
+            Err(e) => info!("Failed to decode editor message: {}", e),
+        }
     }
 }

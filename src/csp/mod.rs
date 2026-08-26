@@ -2,7 +2,12 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::ppp;
+use crate::{
+    id::next_request_id,
+    ppp, rpc,
+    session::editor::{CspNotification, CspRequest, CspResponse, EditorInbound, EditorOutbound},
+    DynResult,
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Request<T> {
@@ -189,4 +194,149 @@ pub enum DocumentEditMode {
     Full,
     #[serde(rename = "incremental")]
     Incremental,
+}
+
+// ─── wire codec ──────────────────────────────────────────────────────────
+// The editor endpoint task in main.rs is the only caller: it decodes every
+// message read from stdin into a typed EditorInbound before it reaches the
+// session, and encodes every EditorOutbound the session emits onto stdout.
+
+pub fn decode(message: &rpc::MessageInfo) -> DynResult<EditorInbound> {
+    let req_id = || {
+        message
+            .id
+            .clone()
+            .ok_or::<crate::DynError>("request id is missing".into())
+    };
+
+    Ok(match message.method.as_str() {
+        "initialize" => EditorInbound::Initialize {
+            req_id: req_id()?,
+            params: rpc::decode_params(&message.content)?,
+        },
+        "initialized" => EditorInbound::Initialized,
+        "move_cursor" => {
+            let params: MoveCursorNotification = rpc::decode_params(&message.content)?;
+            EditorInbound::MoveCursor {
+                location: params.location,
+            }
+        }
+        "document/edit" => {
+            let mode: DocumentEditModeNotification = rpc::decode_params(&message.content)?;
+
+            match mode.mode {
+                DocumentEditMode::Full => {
+                    let params: DocumentEditFull = rpc::decode_params(&message.content)?;
+                    EditorInbound::DocumentEditFull {
+                        uri: params.uri,
+                        content: params.content,
+                    }
+                }
+                DocumentEditMode::Incremental => {
+                    todo!("incremental edits not implemented yet")
+                }
+            }
+        }
+        "document/location" => {
+            let params: LocationResponse = rpc::decode_params(&message.content)?;
+            EditorInbound::DocumentLocation {
+                location: params.location,
+            }
+        }
+        "cwd_changed" => EditorInbound::CwdChanged,
+        "request_fingerprint" => EditorInbound::RequestFingerprint { req_id: req_id()? },
+        "shutdown" => EditorInbound::Shutdown { req_id: req_id()? },
+        "exit" => EditorInbound::Exit,
+        other => EditorInbound::Unknown {
+            method: other.to_string(),
+        },
+    })
+}
+
+pub fn encode(message: EditorOutbound) -> DynResult<Vec<u8>> {
+    match message {
+        EditorOutbound::Response { req_id, response } => match response {
+            CspResponse::Initialize { client_id } => rpc::encode(Response::<InitializeResponse> {
+                id: req_id,
+                result: Some(InitializeResponse {
+                    server_info: Some(ServerInfo {
+                        name: "graffiti-rs".to_string(),
+                        version: Some("0.1.0".to_string()),
+                    }),
+                    client_id,
+                }),
+            }),
+            CspResponse::Shutdown => rpc::encode(Response::<ShutdownResponse> {
+                id: req_id,
+                result: None,
+            }),
+            CspResponse::Fingerprint { fingerprint } => {
+                rpc::encode(Response::<FingerprintResponse> {
+                    id: req_id,
+                    result: Some(FingerprintResponse { fingerprint }),
+                })
+            }
+        },
+        EditorOutbound::Request(request) => match request {
+            CspRequest::Location => rpc::encode(Request::<LocationRequest> {
+                id: Some(next_request_id()),
+                method: "document/location".into(),
+                params: None,
+            }),
+            CspRequest::Shutdown => rpc::encode(Request::<ShutdownRequest> {
+                id: None,
+                method: "shutdown".into(),
+                params: None,
+            }),
+            CspRequest::InitialFileUri {
+                cwd,
+                initial_file_uri,
+            } => rpc::encode(Request::<InitialFileUriRequest> {
+                id: Some(next_request_id()),
+                method: "initial_file_uri".into(),
+                params: Some(InitialFileUriRequest {
+                    cwd,
+                    initial_file_uri,
+                }),
+            }),
+        },
+        EditorOutbound::Notification(notification) => match notification {
+            CspNotification::FingerprintGenerated { fingerprint } => {
+                rpc::encode(Notification::<FingerprintGeneratedNotification> {
+                    method: "fingerprint_generated".into(),
+                    params: Some(FingerprintGeneratedNotification { fingerprint }),
+                })
+            }
+            CspNotification::ClientIdChanged { client_id } => {
+                rpc::encode(Notification::<ClientIdChangedNotification> {
+                    method: "client_id_changed".into(),
+                    params: Some(ClientIdChangedNotification { client_id }),
+                })
+            }
+            CspNotification::CursorMoved {
+                client_id,
+                location,
+            } => rpc::encode(Notification::<CursorMovedNotification> {
+                method: "cursor_moved".into(),
+                params: Some(CursorMovedNotification {
+                    client_id,
+                    location,
+                }),
+            }),
+            CspNotification::DocumentEdited {
+                client_id,
+                uri,
+                content,
+            } => rpc::encode(Notification::<DocumentEditedFull> {
+                method: "document/edited".into(),
+                params: Some(DocumentEditedFull {
+                    client_id,
+                    mode: DocumentEditMode::Full,
+                    uri,
+                    content,
+                }),
+            }),
+        },
+        EditorOutbound::UnknownMethod => rpc::encode("unknown method"),
+    }
 }
