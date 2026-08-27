@@ -50,16 +50,16 @@ pub async fn run_client(
 /// the session's inbox, drains the session's outbound channel onto the wire.
 /// The session closing that channel (dropping the peer) is the close signal.
 async fn run_link(id: PeerId, connection: Connection, session: &SessionHandle) -> DynResult<()> {
-    let (mut writer, mut reader) = connection.split();
-    let (tx, mut rx) = mpsc::channel::<PeerMessage>(8);
+    let (mut peer_writer, mut peer_reader) = connection.split();
+    let (link_sender, mut session_receiver) = mpsc::channel::<PeerMessage>(8);
 
     session
-        .send(SessionEvent::PeerConnected(id.clone(), tx))
+        .send(SessionEvent::PeerConnected(id.clone(), link_sender))
         .await?;
 
     loop {
         tokio::select! {
-            inbound = reader.next() => {
+            inbound = peer_reader.next() => {
                 match inbound {
                     Some(Ok(Message::Data(data))) => match ppp::decode(&data).await {
                         Ok(message) => {
@@ -80,14 +80,14 @@ async fn run_link(id: PeerId, connection: Connection, session: &SessionHandle) -
                     None => break,
                 }
             }
-            outbound = rx.recv() => {
+            outbound = session_receiver.recv() => {
                 match outbound {
                     Some(message) => {
-                        writer.send(Message::Data(ppp::encode(&message)?)).await?
+                        peer_writer.send(Message::Data(ppp::encode(&message)?)).await?
                     }
                     // the session dropped our sender: close the link gracefully
                     None => {
-                        writer.send(Message::Close).await?;
+                        peer_writer.send(Message::Close).await?;
                         break;
                     }
                 }
@@ -95,7 +95,7 @@ async fn run_link(id: PeerId, connection: Connection, session: &SessionHandle) -
         }
     }
 
-    writer.close().await?;
+    peer_writer.close().await?;
     info!("link closed");
 
     session.send(SessionEvent::PeerDisconnected(id)).await?;

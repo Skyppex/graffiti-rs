@@ -317,10 +317,10 @@ impl Connection {
 
                 ssh_config.keys.push(host_key);
 
-                let (channel_tx, channel_rx) = oneshot::channel();
+                let (channel_sender, channel_receiver) = oneshot::channel();
 
                 let ssh_handler = ServerFlow {
-                    channel_tx: Some(channel_tx),
+                    channel_sender: Some(channel_sender),
                     authorized_keys,
                 };
 
@@ -334,7 +334,7 @@ impl Connection {
 
                 info!("ssh session created on {}", uri);
 
-                let channel = channel_rx.await?;
+                let channel = channel_receiver.await?;
 
                 info!("accepted session creation");
 
@@ -458,44 +458,46 @@ impl Connection {
     pub fn split(self) -> (ConnectionWriter, ConnectionReader) {
         match self {
             Connection::DirectHost(stream) => {
-                let (writer, reader) = stream.split();
+                let (write_half, read_half) = stream.split();
 
-                let conn_writer = ConnectionWriter::DirectHost(writer);
-                let conn_reader = ConnectionReader::DirectHost(reader);
+                let conn_writer = ConnectionWriter::DirectHost(write_half);
+                let conn_reader = ConnectionReader::DirectHost(read_half);
 
                 (conn_writer, conn_reader)
             }
             Connection::DirectClient(stream) => {
-                let (writer, reader) = stream.split();
+                let (write_half, read_half) = stream.split();
 
-                let conn_writer = ConnectionWriter::DirectClient(writer);
-                let conn_reader = ConnectionReader::DirectClient(reader);
+                let conn_writer = ConnectionWriter::DirectClient(write_half);
+                let conn_reader = ConnectionReader::DirectClient(read_half);
 
                 (conn_writer, conn_reader)
             }
             Connection::SshHost(stream) => {
-                let (reader, writer) = tokio::io::split(stream);
+                let (read_half, write_half) = tokio::io::split(stream);
 
                 let conn_writer = ConnectionWriter::SshHost(FramedWrite::new(
-                    writer,
+                    write_half,
                     LengthDelimitedCodec::new(),
                 ));
 
-                let conn_reader =
-                    ConnectionReader::SshHost(FramedRead::new(reader, LengthDelimitedCodec::new()));
+                let conn_reader = ConnectionReader::SshHost(FramedRead::new(
+                    read_half,
+                    LengthDelimitedCodec::new(),
+                ));
 
                 (conn_writer, conn_reader)
             }
             Connection::SshClient(stream) => {
-                let (reader, writer) = tokio::io::split(stream);
+                let (read_half, write_half) = tokio::io::split(stream);
 
                 let conn_writer = ConnectionWriter::SshClient(FramedWrite::new(
-                    writer,
+                    write_half,
                     LengthDelimitedCodec::new(),
                 ));
 
                 let conn_reader = ConnectionReader::SshClient(FramedRead::new(
-                    reader,
+                    read_half,
                     LengthDelimitedCodec::new(),
                 ));
 
@@ -659,7 +661,7 @@ impl ServerCertVerifier for FingerprintVerifier {
 }
 
 struct ServerFlow {
-    channel_tx: Option<oneshot::Sender<Channel<server::Msg>>>,
+    channel_sender: Option<oneshot::Sender<Channel<server::Msg>>>,
     authorized_keys: Vec<Vec<u8>>,
 }
 
@@ -708,8 +710,8 @@ impl server::Handler for ServerFlow {
     ) -> Result<bool, Self::Error> {
         info!("accepting session creation");
 
-        if let Some(tx) = self.channel_tx.take() {
-            let _ = tx.send(channel);
+        if let Some(channel_sender) = self.channel_sender.take() {
+            let _ = channel_sender.send(channel);
         }
 
         Ok(true)

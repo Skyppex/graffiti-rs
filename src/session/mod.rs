@@ -36,7 +36,7 @@ pub struct Session {
     state: Arc<Mutex<State>>,
     peers: HashMap<PeerId, Peer>,
     open_links: usize,
-    editor_tx: mpsc::Sender<EditorOutbound>,
+    editor_sender: mpsc::Sender<EditorOutbound>,
     inbox: mpsc::Receiver<SessionEvent>,
     pending_shutdown: Option<String>,
     shutting_down: bool,
@@ -44,12 +44,13 @@ pub struct Session {
 
 #[derive(Clone)]
 pub struct SessionHandle {
-    tx: mpsc::Sender<SessionEvent>,
+    /// sends events into the session's inbox
+    inbox_sender: mpsc::Sender<SessionEvent>,
 }
 
 impl SessionHandle {
     pub async fn send(&self, event: SessionEvent) -> DynResult<()> {
-        self.tx
+        self.inbox_sender
             .send(event)
             .await
             .map_err(|_| "session inbox closed".into())
@@ -69,9 +70,9 @@ impl Session {
     pub fn new(
         role: Role,
         state: Arc<Mutex<State>>,
-        editor_tx: mpsc::Sender<EditorOutbound>,
+        editor_sender: mpsc::Sender<EditorOutbound>,
     ) -> (Self, SessionHandle) {
-        let (tx, inbox) = mpsc::channel(32);
+        let (inbox_sender, inbox) = mpsc::channel(32);
 
         (
             Session {
@@ -79,12 +80,12 @@ impl Session {
                 state,
                 peers: HashMap::new(),
                 open_links: 0,
-                editor_tx,
+                editor_sender,
                 inbox,
                 pending_shutdown: None,
                 shutting_down: false,
             },
-            SessionHandle { tx },
+            SessionHandle { inbox_sender },
         )
     }
 
@@ -117,8 +118,8 @@ impl Session {
                 self.handle_peer_message(from, message).await?;
                 Ok(false)
             }
-            SessionEvent::PeerConnected(id, tx) => {
-                self.handle_peer_connected(id, tx).await?;
+            SessionEvent::PeerConnected(id, link_sender) => {
+                self.handle_peer_connected(id, link_sender).await?;
                 Ok(false)
             }
             SessionEvent::PeerDisconnected(id) => self.handle_peer_disconnected(id).await,
@@ -141,14 +142,14 @@ impl Session {
     async fn handle_peer_connected(
         &mut self,
         id: PeerId,
-        tx: mpsc::Sender<PeerMessage>,
+        link_sender: mpsc::Sender<PeerMessage>,
     ) -> DynResult<()> {
         info!("Peer connected: {:?}", id);
 
         self.peers.insert(
             id.clone(),
             Peer {
-                tx,
+                link_sender,
                 initialized: false,
             },
         );
@@ -551,7 +552,7 @@ impl Session {
     // ─── outbound helpers ────────────────────────────────────────────────
 
     async fn to_editor(&self, message: EditorOutbound) -> DynResult<()> {
-        self.editor_tx
+        self.editor_sender
             .send(message)
             .await
             .map_err(|_| "editor writer closed".into())
@@ -559,7 +560,7 @@ impl Session {
 
     async fn send_to(&self, id: &PeerId, message: PeerMessage) -> DynResult<()> {
         let peer = self.peers.get(id).ok_or("unknown peer")?;
-        peer.tx
+        peer.link_sender
             .send(message)
             .await
             .map_err(|_| "peer link closed".into())
@@ -579,7 +580,7 @@ impl Session {
                 continue;
             }
 
-            peer.tx
+            peer.link_sender
                 .send(PeerMessage::Notification(notification.clone()))
                 .await
                 .map_err(|_| "peer link closed")?;
@@ -670,9 +671,9 @@ mod tests {
     #[tokio::test]
     async fn editor_initialize_gets_a_response() {
         // arrange
-        let (editor_tx, mut editor_rx) = mpsc::channel(8);
+        let (editor_sender, mut editor_receiver) = mpsc::channel(8);
         let state = State::new(PathBuf::new(), None);
-        let (session, handle) = Session::new(Role::Host, state, editor_tx);
+        let (session, handle) = Session::new(Role::Host, state, editor_sender);
         tokio::spawn(session.run());
 
         // act
@@ -693,7 +694,7 @@ mod tests {
             .unwrap();
 
         // assert
-        let response = editor_rx.recv().await.unwrap();
+        let response = editor_receiver.recv().await.unwrap();
         match response {
             EditorOutbound::Response {
                 req_id,
@@ -709,22 +710,22 @@ mod tests {
     #[tokio::test]
     async fn host_relays_to_other_peers_but_not_the_origin() {
         // arrange
-        let (editor_tx, _editor_rx) = mpsc::channel(8);
+        let (editor_sender, _editor_receiver) = mpsc::channel(8);
         let state = State::new(PathBuf::new(), None);
-        let (session, handle) = Session::new(Role::Host, state, editor_tx);
+        let (session, handle) = Session::new(Role::Host, state, editor_sender);
         tokio::spawn(session.run());
 
-        let (a_tx, mut a_rx) = mpsc::channel(8);
-        let (b_tx, mut b_rx) = mpsc::channel(8);
+        let (a_link_sender, mut a_link_receiver) = mpsc::channel(8);
+        let (b_link_sender, mut b_link_receiver) = mpsc::channel(8);
         let a = PeerId::Client("1".into());
         let b = PeerId::Client("2".into());
 
         handle
-            .send(SessionEvent::PeerConnected(a.clone(), a_tx))
+            .send(SessionEvent::PeerConnected(a.clone(), a_link_sender))
             .await
             .unwrap();
         handle
-            .send(SessionEvent::PeerConnected(b.clone(), b_tx))
+            .send(SessionEvent::PeerConnected(b.clone(), b_link_sender))
             .await
             .unwrap();
 
@@ -761,7 +762,7 @@ mod tests {
             .unwrap();
 
         // assert: B receives the relayed move, attributed to A
-        let relayed = b_rx.recv().await.unwrap();
+        let relayed = b_link_receiver.recv().await.unwrap();
         match relayed {
             PeerMessage::Notification(PppNotification::CursorMoved(params)) => {
                 assert_eq!(params.client_id, "1");
@@ -770,6 +771,6 @@ mod tests {
         }
 
         // and A got nothing back
-        assert!(a_rx.try_recv().is_err());
+        assert!(a_link_receiver.try_recv().is_err());
     }
 }

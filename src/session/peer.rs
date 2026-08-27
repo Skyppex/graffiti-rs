@@ -4,7 +4,8 @@ use crate::ppp;
 
 /// What the session knows about one connected link.
 pub struct Peer {
-    pub tx: mpsc::Sender<PeerMessage>,
+    /// sends messages to this peer's link task, which writes them to the wire
+    pub link_sender: mpsc::Sender<PeerMessage>,
     pub initialized: bool,
 }
 
@@ -18,8 +19,8 @@ pub enum PeerId {
 }
 
 /// A typed PPP message. Direction is implicit: arriving in
-/// SessionEvent::FromPeer it was read from the link; pushed into Peer::tx it
-/// will be written to the link.
+/// SessionEvent::FromPeer it was read from the link; pushed into
+/// Peer::link_sender it will be written to the link.
 #[derive(Debug, Clone)]
 pub enum PeerMessage {
     Request {
