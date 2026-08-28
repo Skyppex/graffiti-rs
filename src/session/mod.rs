@@ -8,7 +8,7 @@ use tokio::{
     io::AsyncWriteExt,
     sync::{mpsc, Mutex},
 };
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::{
     csp,
@@ -456,7 +456,7 @@ impl Session {
 
                 let location = self.state.lock().await.get_my_location().cloned();
 
-                if let Some(state::DocumentLocation { uri, .. }) = location {
+                if let Some(state::DocumentLocation { uri, pos }) = location {
                     info!("Sending initial file URI: {:?}", uri);
 
                     self.send_to(
@@ -471,8 +471,11 @@ impl Session {
                         &from,
                         PeerMessage::Notification(PppNotification::CursorMoved(
                             ppp::CursorMovedNotification {
-                                client_id: self.client_id,
-                                location: (),
+                                client_id: self.state.lock().await.client_id.clone(),
+                                location: ppp::DocumentLocation {
+                                    uri,
+                                    pos: pos.into(),
+                                },
                             },
                         )),
                     )
