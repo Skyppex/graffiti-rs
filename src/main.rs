@@ -52,7 +52,18 @@ async fn main() -> DynResult<()> {
     let state = State::new(cwd, cli.graffitiignore);
 
     let role = if is_host { Role::Host } else { Role::Client };
-    let (session, session_handle) = Session::new(role, state.clone(), editor_sender.clone());
+
+    // the client knows its token only because its token arrived out of
+    // band: the session records it, and the network layer turns it into a
+    // host key check
+    let known_token = match &cli.command {
+        Commands::Connect { sha, .. } => Some(sha.clone()),
+        Commands::Host { .. } => None,
+    };
+
+    let (session, session_handle) =
+        Session::new(role, state.clone(), editor_sender.clone(), known_token).await?;
+
     let session_task = tokio::spawn(session.run());
 
     let network_task = match cli.command {
@@ -63,13 +74,7 @@ async fn main() -> DynResult<()> {
             info!("my client id is {}", my_client_id);
             state.lock().await.set_client_id(my_client_id);
 
-            let identity = net::identity::Identity::generate()?;
-
-            tokio::spawn(net::run_host(
-                session_handle.clone(),
-                identity,
-                authorized_keys,
-            ))
+            tokio::spawn(net::run_host(session_handle.clone(), authorized_keys))
         }
         Commands::Connect { sha, client_key } => {
             info!("Starting client mode");

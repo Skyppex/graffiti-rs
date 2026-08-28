@@ -1,7 +1,4 @@
-use std::{
-    net::{IpAddr, Ipv4Addr},
-    sync::Arc,
-};
+use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
 use russh::{
@@ -18,7 +15,7 @@ use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tracing::{info, warn};
 
 use crate::{
-    net::identity::{key_fingerprint, Identity},
+    session::identity::{key_fingerprint, Identity},
     DynError, DynResult,
 };
 
@@ -77,46 +74,6 @@ pub enum ConnectionWriter {
 pub enum ConnectionReader {
     SshHost(FramedRead<ReadHalf<ChannelStream<server::Msg>>, LengthDelimitedCodec>),
     SshClient(FramedRead<ReadHalf<ChannelStream<client::Msg>>, LengthDelimitedCodec>),
-}
-
-async fn get_ip() -> DynResult<String> {
-    Ok(reqwest::get("https://api.ipify.org").await?.text().await?)
-}
-
-/// The address the default route sends our packets from. On a machine with a
-/// public IP bound directly to an interface (e.g. a VPS) this IS the public IP.
-/// No packets are sent: connecting a UDP socket only selects the route.
-fn local_outbound_ip() -> Option<IpAddr> {
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("8.8.8.8:53").ok()?;
-    socket.local_addr().ok().map(|addr| addr.ip())
-}
-
-fn is_global_v4(ip: &Ipv4Addr) -> bool {
-    let octets = ip.octets();
-    // 100.64.0.0/10 is carrier-grade NAT space
-    let is_cgnat = octets[0] == 100 && (64..128).contains(&octets[1]);
-
-    !(ip.is_private()
-        || ip.is_loopback()
-        || ip.is_link_local()
-        || ip.is_unspecified()
-        || ip.is_broadcast()
-        || ip.is_documentation()
-        || is_cgnat)
-}
-
-/// The address peers can reach us on: a globally routable address on one of our
-/// own interfaces when we have one, otherwise whatever the outside world sees us
-/// as, otherwise loopback (offline/local-only).
-pub async fn resolve_public_ip() -> String {
-    if let Some(IpAddr::V4(ip)) = local_outbound_ip() {
-        if is_global_v4(&ip) {
-            return ip.to_string();
-        }
-    }
-
-    get_ip().await.unwrap_or_else(|_| "127.0.0.1".to_string())
 }
 
 pub fn load_authorized_keys(path: &std::path::Path) -> DynResult<Vec<[u8; 32]>> {
@@ -207,11 +164,12 @@ impl Connection {
 
         info!("starting ssh on the bootstrapped socket");
 
-        let mut session =
-            client::connect_stream(Arc::new(ssh_config), socket, ssh_handler).await?;
+        let mut session = client::connect_stream(Arc::new(ssh_config), socket, ssh_handler).await?;
 
         let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(client_key), None);
-        let auth_result = session.authenticate_publickey("peer", key_with_hash).await?;
+        let auth_result = session
+            .authenticate_publickey("peer", key_with_hash)
+            .await?;
 
         if !auth_result.success() {
             return Err("failed to authenticate over ssh".into());

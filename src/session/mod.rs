@@ -1,4 +1,5 @@
 pub mod editor;
+pub mod identity;
 pub mod peer;
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
@@ -8,6 +9,7 @@ use tokio::{
     io::AsyncWriteExt,
     sync::{mpsc, Mutex},
 };
+
 use tracing::info;
 
 use crate::{
@@ -40,12 +42,15 @@ pub struct Session {
     inbox: mpsc::Receiver<SessionEvent>,
     pending_shutdown: Option<String>,
     shutting_down: bool,
+    token: String,
 }
 
 #[derive(Clone)]
 pub struct SessionHandle {
     /// sends events into the session's inbox
     inbox_sender: mpsc::Sender<SessionEvent>,
+    /// the host's identity, when this is a host session
+    identity: Option<identity::Identity>,
 }
 
 impl SessionHandle {
@@ -55,6 +60,12 @@ impl SessionHandle {
             .await
             .map_err(|_| "session inbox closed".into())
     }
+
+    /// The host's identity key, if this is a host session. Transports pull it
+    /// from here rather than receiving one as a parameter: the session owns it.
+    pub fn identity(&self) -> Option<&identity::Identity> {
+        self.identity.as_ref()
+    }
 }
 
 pub enum SessionEvent {
@@ -63,18 +74,39 @@ pub enum SessionEvent {
     PeerConnected(PeerId, mpsc::Sender<PeerMessage>),
     PeerDisconnected(PeerId),
     EditorClosed,
-    Fingerprint(String),
 }
 
 impl Session {
-    pub fn new(
+    pub async fn new(
         role: Role,
         state: Arc<Mutex<State>>,
         editor_sender: mpsc::Sender<EditorOutbound>,
-    ) -> (Self, SessionHandle) {
+        known_token: Option<String>,
+    ) -> DynResult<(Self, SessionHandle)> {
         let (inbox_sender, inbox) = mpsc::channel(32);
 
-        (
+        // A session exists only with a token in hand: the host generates one
+        // from its fresh identity before anything listens, the client brought
+        // one out of band. From here on state.token always holds it.
+        let host_identity = match &role {
+            Role::Host => Some(identity::Identity::generate()?),
+            Role::Client => None,
+        };
+
+        let session_token = match &host_identity {
+            Some(host_identity) => {
+                let token = host_identity.token(&identity::bootstrap_addr().await)?;
+                info!("Token: {}", token);
+                Some(token)
+            }
+            None => known_token,
+        };
+
+        let Some(session_token) = session_token else {
+            panic!("failed to generate session token");
+        };
+
+        Ok((
             Session {
                 role,
                 state,
@@ -84,9 +116,13 @@ impl Session {
                 inbox,
                 pending_shutdown: None,
                 shutting_down: false,
+                token: session_token,
             },
-            SessionHandle { inbox_sender },
-        )
+            SessionHandle {
+                inbox_sender,
+                identity: host_identity,
+            },
+        ))
     }
 
     fn is_host(&self) -> bool {
@@ -124,16 +160,6 @@ impl Session {
             }
             SessionEvent::PeerDisconnected(id) => self.handle_peer_disconnected(id).await,
             SessionEvent::EditorClosed => Ok(true),
-            SessionEvent::Fingerprint(fingerprint) => {
-                self.state.lock().await.set_fingerprint(fingerprint.clone());
-
-                self.to_editor(EditorOutbound::Notification(
-                    CspNotification::FingerprintGenerated { fingerprint },
-                ))
-                .await?;
-
-                Ok(false)
-            }
         }
     }
 
@@ -221,7 +247,7 @@ impl Session {
             EditorInbound::Initialize { req_id, params } => {
                 info!("Received initialize message from editor");
 
-                let client_id = {
+                let (client_id, token) = {
                     let mut state = self.state.lock().await;
 
                     if let Some(csp::InitializeOptions {
@@ -233,12 +259,15 @@ impl Session {
                         }
                     }
 
-                    state.client_id.clone()
+                    (state.client_id.clone(), self.token.clone())
                 };
 
                 self.to_editor(EditorOutbound::Response {
                     req_id,
-                    response: CspResponse::Initialize { client_id },
+                    response: CspResponse::Initialize {
+                        client_id,
+                        token: if self.is_host() { Some(token) } else { None },
+                    },
                 })
                 .await?;
             }
@@ -305,20 +334,14 @@ impl Session {
             EditorInbound::CwdChanged => {
                 info!("Received cwd_changed message from editor");
             }
-            EditorInbound::RequestFingerprint { req_id } => {
-                info!("Received fingerprint message from editor");
+            EditorInbound::RequestSessionToken { req_id } => {
+                info!("Received session token request from editor");
 
-                let fingerprint = self
-                    .state
-                    .lock()
-                    .await
-                    .fingerprint
-                    .clone()
-                    .unwrap_or("No fingerprint".to_string());
+                let token = self.token.clone();
 
                 self.to_editor(EditorOutbound::Response {
                     req_id,
-                    response: CspResponse::Fingerprint { fingerprint },
+                    response: CspResponse::SessionToken { token },
                 })
                 .await?;
             }
@@ -695,7 +718,9 @@ mod tests {
         // arrange
         let (editor_sender, mut editor_receiver) = mpsc::channel(8);
         let state = State::new(PathBuf::new(), None);
-        let (session, handle) = Session::new(Role::Host, state, editor_sender);
+        let (session, handle) = Session::new(Role::Host, state, editor_sender, None)
+            .await
+            .unwrap();
         tokio::spawn(session.run());
 
         // act
@@ -720,10 +745,16 @@ mod tests {
         match response {
             EditorOutbound::Response {
                 req_id,
-                response: CspResponse::Initialize { client_id },
+                response: CspResponse::Initialize { client_id, token },
             } => {
                 assert_eq!(req_id, "1");
                 assert_eq!(client_id, "0");
+
+                // the initialize response is where the editor learns the token:
+                // it must round-trip back into a token and an address
+                let (_, addr) = identity::parse_token(&token.unwrap())
+                    .expect("initialize response carried a malformed token");
+                assert!(addr.ends_with(":32700"));
             }
             other => panic!("expected an initialize response, got {:?}", other),
         }
@@ -734,7 +765,9 @@ mod tests {
         // arrange
         let (editor_sender, _editor_receiver) = mpsc::channel(8);
         let state = State::new(PathBuf::new(), None);
-        let (session, handle) = Session::new(Role::Host, state, editor_sender);
+        let (session, handle) = Session::new(Role::Host, state, editor_sender, None)
+            .await
+            .unwrap();
         tokio::spawn(session.run());
 
         let (a_link_sender, mut a_link_receiver) = mpsc::channel(8);

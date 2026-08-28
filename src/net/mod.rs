@@ -1,6 +1,5 @@
 pub mod bootstrap;
 pub mod connection;
-pub mod identity;
 
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -13,34 +12,28 @@ use crate::{
     net::{
         bootstrap::Protocol,
         connection::{Connection, Message},
-        identity::Identity,
     },
     ppp,
     session::{
+        identity::{parse_token, resolve_public_ip, BOOTSTRAP_PORT},
         peer::{PeerId, PeerMessage},
         SessionEvent, SessionHandle,
     },
     DynResult,
 };
 
-/// The one port a host listens on. Every connection starts with the plaintext
-/// bootstrap prelude here and upgrades in place to the negotiated protocol.
-pub const BOOTSTRAP_PORT: u16 = 32700;
-
 pub async fn run_host(
     session: SessionHandle,
-    identity: Identity,
     authorized_keys_path: std::path::PathBuf,
 ) -> DynResult<()> {
     let authorized_keys = connection::load_authorized_keys(&authorized_keys_path)?;
 
-    // the token exists before anything listens: identity is an input to the
-    // transport, and the fingerprint is an ordinary startup event
-    let bootstrap_addr = format!("{}:{}", connection::resolve_public_ip().await, BOOTSTRAP_PORT);
-    let token = identity.token(&bootstrap_addr)?;
-
-    info!("Fingerprint: {}", token);
-    session.send(SessionEvent::Fingerprint(token)).await?;
+    // the transport proves possession of the session's key, never a key of
+    // its own: the session owns its identity, the network borrows it
+    let identity = session
+        .identity()
+        .cloned()
+        .ok_or("net::run_host requires a host session")?;
 
     let listener = TcpListener::bind(("0.0.0.0", BOOTSTRAP_PORT)).await?;
     info!("Listening on 0.0.0.0:{}", BOOTSTRAP_PORT);
@@ -69,15 +62,15 @@ pub async fn run_client(
     session: SessionHandle,
     client_key_path: std::path::PathBuf,
 ) -> DynResult<()> {
-    let (expected_fingerprint, bootstrap_addr) = identity::parse_token(&token)?;
+    let (expected_fingerprint, bootstrap_addr) = parse_token(&token)?;
 
     // A host advertising our own public address is on this side of the NAT;
     // dial loopback since hairpinning rarely works. The host key check still
-    // runs against the token's fingerprint.
+    // runs against the token.
     let (host, port) = bootstrap_addr
         .rsplit_once(':')
         .ok_or("token address is missing a port")?;
-    let bootstrap_addr = if host == connection::resolve_public_ip().await {
+    let bootstrap_addr = if host == resolve_public_ip().await {
         format!("127.0.0.1:{}", port)
     } else {
         bootstrap_addr
@@ -90,9 +83,7 @@ pub async fn run_client(
     info!("negotiated protocol: {:?}", protocol);
 
     let connection = match protocol {
-        Protocol::Ssh => {
-            Connection::ssh_client(socket, expected_fingerprint, client_key_path).await?
-        }
+        Protocol::Ssh => Connection::ssh_client(socket, expected_fingerprint, client_key_path).await?,
         Protocol::Wss => return Err("wss transport not implemented yet".into()),
     };
 

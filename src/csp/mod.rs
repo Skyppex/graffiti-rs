@@ -52,6 +52,9 @@ pub struct InitializeOptions {
 pub struct InitializeResponse {
     pub server_info: Option<ServerInfo>,
     pub client_id: String,
+    /// The session's out-of-band token: a token the editor shows the
+    /// user to hand to whoever wants to join.
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -64,11 +67,6 @@ pub struct ServerInfo {
 pub struct InitializedNotification;
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct FingerprintGeneratedNotification {
-    pub fingerprint: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
 pub struct ShutdownRequest;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -78,11 +76,11 @@ pub struct ShutdownResponse;
 pub struct ExitNotification;
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct FingerprintRequest;
+pub struct SessionTokenRequest;
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct FingerprintResponse {
-    pub fingerprint: String,
+pub struct SessionTokenResponse {
+    pub token: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -248,7 +246,7 @@ pub fn decode(message: &rpc::MessageInfo) -> DynResult<EditorInbound> {
             }
         }
         "cwd_changed" => EditorInbound::CwdChanged,
-        "request_fingerprint" => EditorInbound::RequestFingerprint { req_id: req_id()? },
+        "request_session_token" => EditorInbound::RequestSessionToken { req_id: req_id()? },
         "shutdown" => EditorInbound::Shutdown { req_id: req_id()? },
         "exit" => EditorInbound::Exit,
         other => EditorInbound::Unknown {
@@ -260,26 +258,27 @@ pub fn decode(message: &rpc::MessageInfo) -> DynResult<EditorInbound> {
 pub fn encode(message: EditorOutbound) -> DynResult<Vec<u8>> {
     match message {
         EditorOutbound::Response { req_id, response } => match response {
-            CspResponse::Initialize { client_id } => rpc::encode(Response::<InitializeResponse> {
-                id: req_id,
-                result: Some(InitializeResponse {
-                    server_info: Some(ServerInfo {
-                        name: "graffiti-rs".to_string(),
-                        version: Some("0.1.0".to_string()),
+            CspResponse::Initialize { client_id, token } => {
+                rpc::encode(Response::<InitializeResponse> {
+                    id: req_id,
+                    result: Some(InitializeResponse {
+                        server_info: Some(ServerInfo {
+                            name: "graffiti-rs".to_string(),
+                            version: Some("0.1.0".to_string()),
+                        }),
+                        client_id,
+                        token,
                     }),
-                    client_id,
-                }),
-            }),
+                })
+            }
             CspResponse::Shutdown => rpc::encode(Response::<ShutdownResponse> {
                 id: req_id,
                 result: None,
             }),
-            CspResponse::Fingerprint { fingerprint } => {
-                rpc::encode(Response::<FingerprintResponse> {
-                    id: req_id,
-                    result: Some(FingerprintResponse { fingerprint }),
-                })
-            }
+            CspResponse::SessionToken { token } => rpc::encode(Response::<SessionTokenResponse> {
+                id: req_id,
+                result: Some(SessionTokenResponse { token }),
+            }),
         },
         EditorOutbound::Request(request) => match request {
             CspRequest::Location => rpc::encode(Request::<LocationRequest> {
@@ -306,12 +305,6 @@ pub fn encode(message: EditorOutbound) -> DynResult<Vec<u8>> {
             }
         },
         EditorOutbound::Notification(notification) => match notification {
-            CspNotification::FingerprintGenerated { fingerprint } => {
-                rpc::encode(Notification::<FingerprintGeneratedNotification> {
-                    method: "fingerprint_generated".into(),
-                    params: Some(FingerprintGeneratedNotification { fingerprint }),
-                })
-            }
             CspNotification::ClientIdChanged { client_id } => {
                 rpc::encode(Notification::<ClientIdChangedNotification> {
                     method: "client_id_changed".into(),

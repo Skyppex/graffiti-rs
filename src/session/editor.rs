@@ -21,7 +21,7 @@ pub enum EditorInbound {
         location: csp::DocumentLocation,
     },
     CwdChanged,
-    RequestFingerprint {
+    RequestSessionToken {
         req_id: String,
     },
     Shutdown {
@@ -58,16 +58,18 @@ pub enum CspRequest {
 
 #[derive(Debug)]
 pub enum CspResponse {
-    Initialize { client_id: String },
+    Initialize {
+        client_id: String,
+        token: Option<String>,
+    },
     Shutdown,
-    Fingerprint { fingerprint: String },
+    SessionToken {
+        token: String,
+    },
 }
 
 #[derive(Debug)]
 pub enum CspNotification {
-    FingerprintGenerated {
-        fingerprint: String,
-    },
     ClientIdChanged {
         client_id: String,
     },

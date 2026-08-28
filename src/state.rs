@@ -15,7 +15,6 @@ pub struct State {
     custom_ignore_file: Option<PathBuf>,
     remote_projects_path: Option<PathBuf>,
     pub client_id: String,
-    pub fingerprint: Option<String>,
     client_locations: HashMap<String, DocumentLocation>,
     file_hashes: HashMap<PathBuf, u64>,
 }
@@ -27,7 +26,6 @@ impl State {
             custom_ignore_file,
             remote_projects_path: None,
             client_id: "0".to_owned(),
-            fingerprint: None,
             client_locations: HashMap::new(),
             file_hashes: HashMap::new(),
         }))
@@ -66,10 +64,6 @@ impl State {
 
     pub fn get_ignore_file(&self) -> Option<PathBuf> {
         self.custom_ignore_file.clone()
-    }
-
-    pub fn set_fingerprint(&mut self, fingerprint: String) {
-        self.fingerprint = Some(fingerprint);
     }
 
     pub fn _get_client_location(&self, client_id: &str) -> Option<&DocumentLocation> {
