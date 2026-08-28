@@ -75,9 +75,10 @@
         packages = with pkgs; [
           toolchain
           tombi
+
           pkg-config
           alejandra
-          nil
+          nixd
         ];
 
         env.RUST_SRC_PATH = "${toolchain}/lib/rustlib/src/rust/library";
