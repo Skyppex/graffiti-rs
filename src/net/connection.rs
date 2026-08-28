@@ -1,69 +1,31 @@
 use std::{
-    future::Future,
     net::{IpAddr, Ipv4Addr},
-    str::FromStr,
     sync::Arc,
 };
 
-use base64::Engine;
-use futures_util::{
-    stream::{SplitSink, SplitStream},
-    SinkExt, StreamExt,
-};
-
-use rcgen::CertifiedKey;
+use futures_util::{SinkExt, StreamExt};
 use russh::{
     client,
-    keys::{ssh_key, Algorithm, PrivateKey, PrivateKeyWithHashAlg},
-    server, Channel, ChannelMsg, ChannelStream, MethodKind, MethodSet,
+    keys::{ssh_key, PrivateKey, PrivateKeyWithHashAlg},
+    server, Channel, ChannelStream, MethodKind, MethodSet,
 };
-use rustls::{
-    client::danger::{ServerCertVerified, ServerCertVerifier},
-    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
-    ClientConfig, ServerConfig, SignatureScheme,
-};
-use sha2::{Digest, Sha256};
 use tokio::{
     io::{ReadHalf, WriteHalf},
-    net::{TcpListener, TcpStream},
+    net::TcpStream,
     sync::oneshot,
-};
-use tokio_rustls::{server::TlsStream, TlsAcceptor};
-use tokio_tungstenite::{
-    accept_async_with_config, connect_async_tls_with_config,
-    tungstenite::{self, http::Uri, Utf8Bytes},
-    Connector, MaybeTlsStream, WebSocketStream,
 };
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tracing::{info, warn};
 
-use crate::{DynError, DynResult};
+use crate::{
+    net::identity::{key_fingerprint, Identity},
+    DynError, DynResult,
+};
 
 #[derive(Debug, Clone)]
 pub enum Message {
     Data(Vec<u8>),
     Close,
-}
-
-impl From<tungstenite::Message> for Message {
-    fn from(value: tungstenite::Message) -> Self {
-        match value {
-            tungstenite::Message::Text(data) => Message::Data(data.bytes().collect::<Vec<_>>()),
-            tungstenite::Message::Close(_) => Message::Close,
-            _ => todo!("unhandled message type (wss)"),
-        }
-    }
-}
-
-impl TryInto<tungstenite::Message> for Message {
-    type Error = DynError;
-
-    fn try_into(self) -> Result<tungstenite::Message, Self::Error> {
-        match self {
-            Message::Data(data) => Ok(tungstenite::Message::Text(Utf8Bytes::try_from(data)?)),
-            Message::Close => Ok(tungstenite::Message::Close(None)),
-        }
-    }
 }
 
 impl From<Message> for Vec<u8> {
@@ -102,47 +64,19 @@ impl TryFrom<Vec<u8>> for Message {
     }
 }
 
-impl TryFrom<ChannelMsg> for Message {
-    type Error = DynError;
-
-    fn try_from(value: ChannelMsg) -> Result<Self, Self::Error> {
-        match value {
-            ChannelMsg::Data { data } => Ok(data.to_vec().try_into()?),
-            ChannelMsg::Close => Ok(Message::Close),
-            _ => todo!("unhandled message type (ssh)"),
-        }
-    }
-}
-
-pub enum ConnectionMode {
-    Direct,
-    Ssh,
-}
-
 pub enum Connection {
-    DirectHost(WebSocketStream<TlsStream<TcpStream>>),
-    DirectClient(WebSocketStream<MaybeTlsStream<TcpStream>>),
     SshHost(ChannelStream<server::Msg>),
     SshClient(ChannelStream<client::Msg>),
 }
 
 pub enum ConnectionWriter {
-    DirectHost(SplitSink<WebSocketStream<TlsStream<TcpStream>>, tungstenite::Message>),
-    DirectClient(SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, tungstenite::Message>),
     SshHost(FramedWrite<WriteHalf<ChannelStream<server::Msg>>, LengthDelimitedCodec>),
     SshClient(FramedWrite<WriteHalf<ChannelStream<client::Msg>>, LengthDelimitedCodec>),
 }
 
 pub enum ConnectionReader {
-    DirectHost(SplitStream<WebSocketStream<TlsStream<TcpStream>>>),
-    DirectClient(SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>),
     SshHost(FramedRead<ReadHalf<ChannelStream<server::Msg>>, LengthDelimitedCodec>),
     SshClient(FramedRead<ReadHalf<ChannelStream<client::Msg>>, LengthDelimitedCodec>),
-}
-
-struct CertData {
-    certs: Vec<CertificateDer<'static>>,
-    key: PrivateKeyDer<'static>,
 }
 
 async fn get_ip() -> DynResult<String> {
@@ -175,7 +109,7 @@ fn is_global_v4(ip: &Ipv4Addr) -> bool {
 /// The address peers can reach us on: a globally routable address on one of our
 /// own interfaces when we have one, otherwise whatever the outside world sees us
 /// as, otherwise loopback (offline/local-only).
-async fn resolve_public_ip() -> String {
+pub async fn resolve_public_ip() -> String {
     if let Some(IpAddr::V4(ip)) = local_outbound_ip() {
         if is_global_v4(&ip) {
             return ip.to_string();
@@ -185,38 +119,7 @@ async fn resolve_public_ip() -> String {
     get_ip().await.unwrap_or_else(|_| "127.0.0.1".to_string())
 }
 
-fn generate_cert(public_ip: String) -> CertData {
-    let CertifiedKey { cert, key_pair } =
-        rcgen::generate_simple_self_signed(vec![public_ip]).unwrap();
-    let cert_der = cert.der();
-    let priv_key_der = key_pair.serialize_der();
-
-    CertData {
-        certs: vec![cert_der.clone()],
-        key: PrivateKeyDer::from(PrivatePkcs8KeyDer::from(priv_key_der)),
-    }
-}
-
-fn compute_token(data: &[u8], connection_string: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    let result = hasher.finalize();
-
-    let result = result
-        .into_iter()
-        .chain(connection_string.iter().copied())
-        .collect::<Vec<u8>>();
-
-    base64::prelude::BASE64_STANDARD.encode(result)
-}
-
-fn compute_token_simple(data: &[u8]) -> Vec<u8> {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    hasher.finalize().to_vec()
-}
-
-fn load_authorized_keys(path: &std::path::Path) -> DynResult<Vec<Vec<u8>>> {
+pub fn load_authorized_keys(path: &std::path::Path) -> DynResult<Vec<[u8; 32]>> {
     let content = std::fs::read_to_string(path).map_err(|e| {
         format!(
             "failed to read authorized keys file {}: {}",
@@ -233,7 +136,7 @@ fn load_authorized_keys(path: &std::path::Path) -> DynResult<Vec<Vec<u8>>> {
         }
 
         match ssh_key::PublicKey::from_openssh(line) {
-            Ok(key) => fingerprints.push(compute_token_simple(key.to_bytes()?.as_ref())),
+            Ok(key) => fingerprints.push(key_fingerprint(key.to_bytes()?.as_ref())),
             Err(e) => warn!("skipping unparseable authorized keys line: {}", e),
         }
     }
@@ -246,105 +149,44 @@ fn load_authorized_keys(path: &std::path::Path) -> DynResult<Vec<Vec<u8>>> {
 }
 
 impl Connection {
-    pub async fn host<F, Fut>(
-        mode: ConnectionMode,
-        token_generated: F,
-        authorized_keys_path: std::path::PathBuf,
-    ) -> DynResult<Self>
-    where
-        F: FnOnce(String) -> Fut,
-        Fut: Future<Output = DynResult<()>>,
-    {
-        let authorized_keys = load_authorized_keys(&authorized_keys_path)?;
-        match mode {
-            ConnectionMode::Direct => {
-                let ip = get_ip().await.unwrap_or_else(|_| "127.0.0.1".to_string());
-                let cert_data = generate_cert(ip.clone());
-                let ip = IpAddr::from_str(&ip)?;
+    /// Takes over a socket whose bootstrap prelude chose ssh, host side: the
+    /// identity key becomes the SSH host key the client will verify against
+    /// the token.
+    pub async fn ssh_host(
+        socket: TcpStream,
+        identity: Identity,
+        authorized_keys: Vec<[u8; 32]>,
+    ) -> DynResult<Self> {
+        let mut ssh_config = server::Config::default();
+        ssh_config.keys.push(identity.key);
 
-                let octets = match ip {
-                    IpAddr::V4(v4) => v4.octets().to_vec(),
-                    IpAddr::V6(v6) => v6.octets().to_vec(),
-                };
+        let (channel_sender, channel_receiver) = oneshot::channel();
 
-                let connection_string = [b"ws://".to_vec(), octets].concat();
-                let token = compute_token(&cert_data.certs[0], &connection_string);
+        let ssh_handler = ServerFlow {
+            channel_sender: Some(channel_sender),
+            authorized_keys,
+        };
 
-                token_generated(token.clone()).await?;
+        info!("starting ssh on the bootstrapped socket");
 
-                let tls_config = ServerConfig::builder()
-                    .with_no_client_auth()
-                    .with_single_cert(cert_data.certs, cert_data.key)?;
+        let session = server::run_stream(Arc::new(ssh_config), socket, ssh_handler).await?;
 
-                let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
+        tokio::spawn(async move {
+            let _ = session.await;
+        });
 
-                let uri = "0.0.0.0:32700";
-                let listener = TcpListener::bind(uri).await?;
-                info!("Listening on {}", uri);
+        let channel = channel_receiver.await?;
 
-                let (socket, _) = listener.accept().await?;
+        info!("accepted session creation");
 
-                let tls_stream = match tls_acceptor.accept(socket).await {
-                    Ok(s) => s,
-                    Err(e) => return Err(Box::new(e)),
-                };
-
-                let ws_stream = accept_async_with_config(tls_stream, None).await?;
-
-                Ok(Connection::DirectHost(ws_stream))
-            }
-            ConnectionMode::Ssh => {
-                let host = resolve_public_ip().await;
-
-                let connection_string = [b"ssh://".to_vec(), host.as_bytes().to_vec()].concat();
-
-                let host_key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)?;
-
-                let token = compute_token(
-                    host_key.public_key().to_bytes()?.as_ref(),
-                    &connection_string,
-                );
-
-                token_generated(token.to_string()).await?;
-
-                let uri = "0.0.0.0:32722";
-                let listener = TcpListener::bind(uri).await?;
-                info!("Listening on {}", uri);
-
-                let (socket, _) = listener.accept().await?;
-
-                let mut ssh_config = server::Config::default();
-
-                ssh_config.keys.push(host_key);
-
-                let (channel_sender, channel_receiver) = oneshot::channel();
-
-                let ssh_handler = ServerFlow {
-                    channel_sender: Some(channel_sender),
-                    authorized_keys,
-                };
-
-                info!("creating ssh session on {}", uri);
-
-                let session = server::run_stream(Arc::new(ssh_config), socket, ssh_handler).await?;
-
-                tokio::spawn(async move {
-                    let _ = session.await;
-                });
-
-                info!("ssh session created on {}", uri);
-
-                let channel = channel_receiver.await?;
-
-                info!("accepted session creation");
-
-                Ok(Connection::SshHost(channel.into_stream()))
-            }
-        }
+        Ok(Connection::SshHost(channel.into_stream()))
     }
 
-    pub async fn connect(
-        token_from_out_of_band: String,
+    /// Takes over a socket whose bootstrap prelude chose ssh, client side:
+    /// the server's host key must hash to the fingerprint from the token.
+    pub async fn ssh_client(
+        socket: TcpStream,
+        expected_fingerprint: [u8; 32],
         client_key_path: std::path::PathBuf,
     ) -> DynResult<Self> {
         let content = tokio::fs::read_to_string(&client_key_path)
@@ -358,121 +200,32 @@ impl Connection {
             })?;
         let client_key = PrivateKey::from_openssh(&content)?;
 
-        let (fingerprint, connection_string, connection_mode) = {
-            let decoded =
-                base64::prelude::BASE64_STANDARD.decode(token_from_out_of_band.clone())?;
-
-            let (fingerprint, connection_string) = decoded.split_at(32);
-
-            let conn_str = String::from_utf8_lossy(connection_string);
-
-            let conn_uri = Uri::from_str(&conn_str)?;
-
-            info!("uri {:?}", conn_uri);
-            info!("scheme {:?}", conn_uri.scheme_str());
-
-            if conn_uri.scheme_str().is_some_and(|s| s == "ssh") {
-                (
-                    fingerprint.to_vec(),
-                    connection_string.to_vec(),
-                    ConnectionMode::Ssh,
-                )
-            } else if conn_uri.scheme_str().is_some_and(|s| s == "wss") {
-                (
-                    fingerprint.to_vec(),
-                    connection_string.to_vec(),
-                    ConnectionMode::Direct,
-                )
-            } else {
-                return Err(format!("unsupported protocol: {:?}", conn_uri.scheme_str()).into());
-            }
+        let ssh_config = client::Config::default();
+        let ssh_handler = ClientFlow {
+            expected_fingerprint,
         };
 
-        let host = format!("{}", String::from_utf8_lossy(&connection_string)).parse::<Uri>()?;
+        info!("starting ssh on the bootstrapped socket");
 
-        match connection_mode {
-            ConnectionMode::Direct => {
-                let verifier = FingerprintVerifier::new(fingerprint);
+        let mut session =
+            client::connect_stream(Arc::new(ssh_config), socket, ssh_handler).await?;
 
-                let tls_config = ClientConfig::builder()
-                    .dangerous()
-                    .with_custom_certificate_verifier(Arc::new(verifier))
-                    .with_no_client_auth();
+        let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(client_key), None);
+        let auth_result = session.authenticate_publickey("peer", key_with_hash).await?;
 
-                let tls_connector = Connector::Rustls(Arc::new(tls_config));
-
-                let address = format!("{}:32700", host);
-                info!("Connecting to {}", address);
-
-                let (ws_stream, _) =
-                    connect_async_tls_with_config(address, None, false, Some(tls_connector))
-                        .await?;
-
-                Ok(Connection::DirectClient(ws_stream))
-            }
-            ConnectionMode::Ssh => {
-                let ssh_config = client::Config::default();
-                let ssh_handler = ClientFlow {
-                    connection_string,
-                    expected_fingerprint_hex: token_from_out_of_band,
-                };
-
-                let host = host.host().ok_or("missing host")?;
-
-                // A host advertising our own public address is on this side of the
-                // NAT; dial loopback since hairpinning rarely works. The hash check
-                // still runs against the token's original connection string.
-                let host = if host == resolve_public_ip().await {
-                    "127.0.0.1"
-                } else {
-                    host
-                };
-
-                let address = format!("{}:32722", host);
-
-                info!("creating ssh session on {}", &address);
-
-                let mut session =
-                    client::connect(Arc::new(ssh_config), &address, ssh_handler).await?;
-
-                info!("ssh session created on {}", address);
-
-                let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(client_key), None);
-                let auth_result = session
-                    .authenticate_publickey("peer", key_with_hash)
-                    .await?;
-
-                if !auth_result.success() {
-                    return Err("failed to authenticate over ssh".into());
-                }
-
-                let channel = session.channel_open_session().await?;
-
-                info!("ssh session created on {}", address);
-
-                Ok(Connection::SshClient(channel.into_stream()))
-            }
+        if !auth_result.success() {
+            return Err("failed to authenticate over ssh".into());
         }
+
+        let channel = session.channel_open_session().await?;
+
+        info!("ssh session established");
+
+        Ok(Connection::SshClient(channel.into_stream()))
     }
 
     pub fn split(self) -> (ConnectionWriter, ConnectionReader) {
         match self {
-            Connection::DirectHost(stream) => {
-                let (write_half, read_half) = stream.split();
-
-                let conn_writer = ConnectionWriter::DirectHost(write_half);
-                let conn_reader = ConnectionReader::DirectHost(read_half);
-
-                (conn_writer, conn_reader)
-            }
-            Connection::DirectClient(stream) => {
-                let (write_half, read_half) = stream.split();
-
-                let conn_writer = ConnectionWriter::DirectClient(write_half);
-                let conn_reader = ConnectionReader::DirectClient(read_half);
-
-                (conn_writer, conn_reader)
-            }
             Connection::SshHost(stream) => {
                 let (read_half, write_half) = tokio::io::split(stream);
 
@@ -510,8 +263,6 @@ impl Connection {
 impl ConnectionWriter {
     pub async fn send(&mut self, msg: Message) -> DynResult<()> {
         match self {
-            ConnectionWriter::DirectHost(stream) => stream.send(msg.try_into()?).await?,
-            ConnectionWriter::DirectClient(stream) => stream.send(msg.try_into()?).await?,
             ConnectionWriter::SshHost(stream) => {
                 stream.send(Into::<Vec<u8>>::into(msg).into()).await?
             }
@@ -525,8 +276,6 @@ impl ConnectionWriter {
 
     pub async fn close(&mut self) -> DynResult<()> {
         match self {
-            ConnectionWriter::DirectHost(stream) => stream.close().await?,
-            ConnectionWriter::DirectClient(stream) => stream.close().await?,
             ConnectionWriter::SshHost(stream) => stream.close().await?,
             ConnectionWriter::SshClient(stream) => stream.close().await?,
         }
@@ -538,14 +287,6 @@ impl ConnectionWriter {
 impl ConnectionReader {
     pub async fn next(&mut self) -> Option<DynResult<Message>> {
         match self {
-            ConnectionReader::DirectHost(stream) => stream
-                .next()
-                .await
-                .map(|v| v.map(|v| v.into()).map_err(|e| e.into())),
-            ConnectionReader::DirectClient(stream) => stream
-                .next()
-                .await
-                .map(|v| v.map(|v| v.into()).map_err(|e| e.into())),
             ConnectionReader::SshHost(channel) => channel.next().await.map(|v| {
                 v.map(|v| TryInto::<Message>::try_into(v.to_vec()))
                     .map_err(|e| e.into())
@@ -560,114 +301,13 @@ impl ConnectionReader {
     }
 }
 
-#[derive(Debug)]
-struct FingerprintVerifier {
-    fingerprint: Vec<u8>,
-}
-
-impl FingerprintVerifier {
-    pub fn new(fingerprint: Vec<u8>) -> Self {
-        Self { fingerprint }
-    }
-}
-
-impl ServerCertVerifier for FingerprintVerifier {
-    fn verify_server_cert(
-        &self,
-        end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        let mut hasher = Sha256::new();
-        hasher.update(end_entity.as_ref());
-        let fingerprint = hasher.finalize();
-
-        if fingerprint.as_slice() == self.fingerprint.as_slice() {
-            Ok(ServerCertVerified::assertion())
-        } else {
-            eprintln!("Fingerprint mismatch");
-            Err(rustls::Error::General("Fingerprint mismatch".into()))
-        }
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        // For development, we can accept all signatures
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-
-        // // Use webpki to verify the signature
-        // let cert_content = cert.as_ref();
-        // let alg = match dss.scheme {
-        //     rustls::SignatureScheme::RSA_PKCS1_SHA256 => &webpki::RSA_PKCS1_2048_8192_SHA256,
-        //     rustls::SignatureScheme::ECDSA_NISTP256_SHA256 => &webpki::ECDSA_P256_SHA256,
-        //     // Add other schemes you want to support
-        //     _ => return Err(rustls::Error::General("Unsupported signature scheme".into())),
-        // };
-        //
-        // match alg.verify(
-        //     untrusted::Input::from(cert_content),
-        //     untrusted::Input::from(message),
-        //     untrusted::Input::from(&dss.signature),
-        // ) {
-        //     Ok(()) => Ok(rustls::client::danger::HandshakeSignatureValid::assertion()),
-        //     Err(_) => Err(rustls::Error::General("Invalid signature".into())),
-        // }
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        // For development, we can accept all signatures
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-
-        // // TLS 1.3 uses different signature verification
-        // // Similar to TLS 1.2 but with TLS 1.3 specific algorithms
-        // let cert_content = cert.as_ref();
-        // let alg = match dss.scheme {
-        //     rustls::SignatureScheme::RSA_PSS_SHA256 => &webpki::RSA_PSS_2048_8192_SHA256,
-        //     rustls::SignatureScheme::ECDSA_NISTP384_SHA384 => &webpki::ECDSA_P384_SHA384,
-        //     // Add other TLS 1.3 schemes
-        //     _ => return Err(rustls::Error::General("Unsupported signature scheme".into())),
-        // };
-        //
-        // match alg.verify(
-        //     untrusted::Input::from(cert_content),
-        //     untrusted::Input::from(message),
-        //     untrusted::Input::from(&dss.signature),
-        // ) {
-        //     Ok(()) => Ok(rustls::client::danger::HandshakeSignatureValid::assertion()),
-        //     Err(_) => Err(rustls::Error::General("Invalid signature".into())),
-        // }
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        vec![
-            SignatureScheme::ED25519,
-            SignatureScheme::RSA_PSS_SHA256,
-            SignatureScheme::ECDSA_NISTP256_SHA256,
-            SignatureScheme::RSA_PKCS1_SHA256,
-            SignatureScheme::ECDSA_NISTP384_SHA384,
-        ]
-    }
-}
-
 struct ServerFlow {
     channel_sender: Option<oneshot::Sender<Channel<server::Msg>>>,
-    authorized_keys: Vec<Vec<u8>>,
+    authorized_keys: Vec<[u8; 32]>,
 }
 
 struct ClientFlow {
-    connection_string: Vec<u8>,
-    expected_fingerprint_hex: String,
+    expected_fingerprint: [u8; 32],
 }
 
 impl server::Handler for ServerFlow {
@@ -694,9 +334,9 @@ impl server::Handler for ServerFlow {
         public_key: &russh::keys::PublicKey,
     ) -> Result<russh::server::Auth, Self::Error> {
         let key_bytes = public_key.to_bytes().map_err(|e| e.to_string())?;
-        let key_fingerprint = compute_token_simple(key_bytes.as_ref());
+        let fingerprint = key_fingerprint(key_bytes.as_ref());
 
-        if self.authorized_keys.iter().any(|f| f == &key_fingerprint) {
+        if self.authorized_keys.contains(&fingerprint) {
             Ok(russh::server::Auth::Accept)
         } else {
             Ok(russh::server::Auth::reject())
@@ -725,10 +365,7 @@ impl client::Handler for ClientFlow {
         &mut self,
         server_public_key: &ssh_key::PublicKey,
     ) -> Result<bool, Self::Error> {
-        let computed = compute_token(
-            server_public_key.to_bytes()?.as_ref(),
-            &self.connection_string,
-        );
-        Ok(computed == self.expected_fingerprint_hex)
+        let fingerprint = key_fingerprint(server_public_key.to_bytes()?.as_ref());
+        Ok(fingerprint == self.expected_fingerprint)
     }
 }

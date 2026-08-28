@@ -1,11 +1,20 @@
+pub mod bootstrap;
 pub mod connection;
+pub mod identity;
 
-use tokio::sync::mpsc;
+use tokio::{
+    net::{TcpListener, TcpStream},
+    sync::mpsc,
+};
 use tracing::info;
 
 use crate::{
     id::next_client_id,
-    net::connection::{Connection, ConnectionMode, Message},
+    net::{
+        bootstrap::Protocol,
+        connection::{Connection, Message},
+        identity::Identity,
+    },
     ppp,
     session::{
         peer::{PeerId, PeerMessage},
@@ -14,20 +23,39 @@ use crate::{
     DynResult,
 };
 
+/// The one port a host listens on. Every connection starts with the plaintext
+/// bootstrap prelude here and upgrades in place to the negotiated protocol.
+pub const BOOTSTRAP_PORT: u16 = 32700;
+
 pub async fn run_host(
     session: SessionHandle,
+    identity: Identity,
     authorized_keys_path: std::path::PathBuf,
 ) -> DynResult<()> {
-    info!("connecting...");
-    let connection = Connection::host(
-        ConnectionMode::Ssh,
-        async |fingerprint| {
-            info!("Fingerprint: {}", &fingerprint);
-            session.send(SessionEvent::Fingerprint(fingerprint)).await
-        },
-        authorized_keys_path,
-    )
-    .await?;
+    let authorized_keys = connection::load_authorized_keys(&authorized_keys_path)?;
+
+    // the token exists before anything listens: identity is an input to the
+    // transport, and the fingerprint is an ordinary startup event
+    let bootstrap_addr = format!("{}:{}", connection::resolve_public_ip().await, BOOTSTRAP_PORT);
+    let token = identity.token(&bootstrap_addr)?;
+
+    info!("Fingerprint: {}", token);
+    session.send(SessionEvent::Fingerprint(token)).await?;
+
+    let listener = TcpListener::bind(("0.0.0.0", BOOTSTRAP_PORT)).await?;
+    info!("Listening on 0.0.0.0:{}", BOOTSTRAP_PORT);
+
+    let (mut socket, peer_addr) = listener.accept().await?;
+    info!("bootstrap connection from {}", peer_addr);
+
+    let protocol = bootstrap::negotiate_host(&mut socket).await?;
+    info!("negotiated protocol: {:?}", protocol);
+
+    let connection = match protocol {
+        Protocol::Ssh => Connection::ssh_host(socket, identity, authorized_keys).await?,
+        // negotiate_host refuses unimplemented protocols before picking them
+        Protocol::Wss => unreachable!("wss has no upgrade path yet"),
+    };
 
     info!("connection established");
 
@@ -37,11 +65,38 @@ pub async fn run_host(
 }
 
 pub async fn run_client(
-    fingerprint: String,
+    token: String,
     session: SessionHandle,
     client_key_path: std::path::PathBuf,
 ) -> DynResult<()> {
-    let connection = Connection::connect(fingerprint, client_key_path).await?;
+    let (expected_fingerprint, bootstrap_addr) = identity::parse_token(&token)?;
+
+    // A host advertising our own public address is on this side of the NAT;
+    // dial loopback since hairpinning rarely works. The host key check still
+    // runs against the token's fingerprint.
+    let (host, port) = bootstrap_addr
+        .rsplit_once(':')
+        .ok_or("token address is missing a port")?;
+    let bootstrap_addr = if host == connection::resolve_public_ip().await {
+        format!("127.0.0.1:{}", port)
+    } else {
+        bootstrap_addr
+    };
+
+    info!("connecting to bootstrap endpoint {}", bootstrap_addr);
+    let mut socket = TcpStream::connect(&bootstrap_addr).await?;
+
+    let protocol = bootstrap::negotiate_client(&mut socket).await?;
+    info!("negotiated protocol: {:?}", protocol);
+
+    let connection = match protocol {
+        Protocol::Ssh => {
+            Connection::ssh_client(socket, expected_fingerprint, client_key_path).await?
+        }
+        Protocol::Wss => return Err("wss transport not implemented yet".into()),
+    };
+
+    info!("connection established");
 
     run_link(PeerId::Host, connection, &session).await
 }

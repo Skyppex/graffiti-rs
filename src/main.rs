@@ -63,7 +63,13 @@ async fn main() -> DynResult<()> {
             info!("my client id is {}", my_client_id);
             state.lock().await.set_client_id(my_client_id);
 
-            tokio::spawn(net::run_host(session_handle.clone(), authorized_keys))
+            let identity = net::identity::Identity::generate()?;
+
+            tokio::spawn(net::run_host(
+                session_handle.clone(),
+                identity,
+                authorized_keys,
+            ))
         }
         Commands::Connect { sha, client_key } => {
             info!("Starting client mode");
