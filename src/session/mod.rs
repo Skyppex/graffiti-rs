@@ -114,7 +114,7 @@ impl Session {
         match event {
             SessionEvent::FromEditor(message) => self.handle_editor_message(message).await,
             SessionEvent::FromPeer(from, message) => {
-                info!("Received from peer {:?}: {:?}", from, message);
+                info!("Received from peer {:?}: {}", from, message.method());
                 self.handle_peer_message(from, message).await?;
                 Ok(false)
             }

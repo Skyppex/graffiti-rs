@@ -167,6 +167,18 @@ pub struct InitialFileNotification {
     pub uri: PathBuf,
 }
 
+/// The PPP wire vocabulary: every method name that can appear in a frame,
+/// defined once. The codec below and PeerMessage::method() both read from
+/// here, so a message always reports exactly the method it travels under.
+pub mod method {
+    pub const INITIALIZE: &str = "initialize";
+    pub const INITIALIZED: &str = "initialized";
+    pub const DIRECTORIES_UPLOAD: &str = "directories/upload";
+    pub const INITIAL_FILE_URI: &str = "initial_file_uri";
+    pub const CURSOR_MOVED: &str = "cursor_moved";
+    pub const DOCUMENT_EDIT: &str = "document/edit";
+}
+
 // ─── wire codec ──────────────────────────────────────────────────────────
 // The link tasks in `net` are the only callers: they decode every frame read
 // from the wire into a typed PeerMessage before it reaches the session, and
@@ -181,41 +193,41 @@ pub async fn decode(data: &[u8]) -> DynResult<PeerMessage> {
         .unwrap_or(false);
 
     match (info.id, info.method, is_response) {
-        (Some(req_id), Some(method), true) => {
-            let response = match method.as_str() {
-                "initialize" => PppResponse::Initialize(rpc::decode_result(&info.content)?),
+        (Some(req_id), Some(name), true) => {
+            let response = match name.as_str() {
+                method::INITIALIZE => PppResponse::Initialize(rpc::decode_result(&info.content)?),
                 other => return Err(format!("unknown response method: {}", other).into()),
             };
 
             Ok(PeerMessage::Response { req_id, response })
         }
-        (Some(req_id), Some(method), false) => {
-            let request = match method.as_str() {
-                "initialize" => PppRequest::Initialize(rpc::decode_params(&info.content)?),
+        (Some(req_id), Some(name), false) => {
+            let request = match name.as_str() {
+                method::INITIALIZE => PppRequest::Initialize(rpc::decode_params(&info.content)?),
                 other => return Err(format!("unknown request method: {}", other).into()),
             };
 
             Ok(PeerMessage::Request { req_id, request })
         }
-        (None, Some(method), _) => Ok(PeerMessage::Notification(decode_notification(
-            &method,
+        (None, Some(name), _) => Ok(PeerMessage::Notification(decode_notification(
+            &name,
             &info.content,
         )?)),
         _ => Err("a message must carry a method".into()),
     }
 }
 
-fn decode_notification(method: &str, content: &[u8]) -> DynResult<PppNotification> {
-    match method {
-        "initialized" => Ok(PppNotification::Initialized(rpc::decode_params(content)?)),
-        "directories/upload" => Ok(PppNotification::DirectoriesUpload(rpc::decode_params(
+fn decode_notification(name: &str, content: &[u8]) -> DynResult<PppNotification> {
+    match name {
+        method::INITIALIZED => Ok(PppNotification::Initialized(rpc::decode_params(content)?)),
+        method::DIRECTORIES_UPLOAD => Ok(PppNotification::DirectoriesUpload(rpc::decode_params(
             content,
         )?)),
-        "initial_file_uri" => Ok(PppNotification::InitialFileUri(rpc::decode_params(
+        method::INITIAL_FILE_URI => Ok(PppNotification::InitialFileUri(rpc::decode_params(
             content,
         )?)),
-        "cursor_moved" => Ok(PppNotification::CursorMoved(rpc::decode_params(content)?)),
-        "document/edit" => {
+        method::CURSOR_MOVED => Ok(PppNotification::CursorMoved(rpc::decode_params(content)?)),
+        method::DOCUMENT_EDIT => {
             let mode: DocumentEditModeNotification = rpc::decode_params(content)?;
 
             match mode.mode {
@@ -232,47 +244,45 @@ fn decode_notification(method: &str, content: &[u8]) -> DynResult<PppNotificatio
 }
 
 pub fn encode(message: &PeerMessage) -> DynResult<Vec<u8>> {
+    let method = message.method().to_string();
+
     match message {
         PeerMessage::Request { req_id, request } => match request {
             PppRequest::Initialize(params) => rpc::encode(Request {
                 id: req_id.clone(),
-                method: "initialize".into(),
+                method,
                 params: Some(params.clone()),
             }),
         },
         PeerMessage::Response { req_id, response } => match response {
             PppResponse::Initialize(result) => rpc::encode(Response {
                 id: req_id.clone(),
-                method: "initialize".into(),
+                method,
                 result: Some(result.clone()),
             }),
         },
-        PeerMessage::Notification(notification) => encode_notification(notification),
-    }
-}
-
-fn encode_notification(notification: &PppNotification) -> DynResult<Vec<u8>> {
-    match notification {
-        PppNotification::Initialized(params) => rpc::encode(Notification {
-            method: "initialized".to_string(),
-            params: Some(params.clone()),
-        }),
-        PppNotification::DirectoriesUpload(params) => rpc::encode(Notification {
-            method: "directories/upload".to_string(),
-            params: Some(params.clone()),
-        }),
-        PppNotification::InitialFileUri(params) => rpc::encode(Notification {
-            method: "initial_file_uri".to_string(),
-            params: Some(params.clone()),
-        }),
-        PppNotification::CursorMoved(params) => rpc::encode(Notification {
-            method: "cursor_moved".to_string(),
-            params: Some(params.clone()),
-        }),
-        PppNotification::DocumentEditFull(params) => rpc::encode(Notification {
-            method: "document/edit".to_string(),
-            params: Some(params.clone()),
-        }),
+        PeerMessage::Notification(notification) => match notification {
+            PppNotification::Initialized(params) => rpc::encode(Notification {
+                method,
+                params: Some(params.clone()),
+            }),
+            PppNotification::DirectoriesUpload(params) => rpc::encode(Notification {
+                method,
+                params: Some(params.clone()),
+            }),
+            PppNotification::InitialFileUri(params) => rpc::encode(Notification {
+                method,
+                params: Some(params.clone()),
+            }),
+            PppNotification::CursorMoved(params) => rpc::encode(Notification {
+                method,
+                params: Some(params.clone()),
+            }),
+            PppNotification::DocumentEditFull(params) => rpc::encode(Notification {
+                method,
+                params: Some(params.clone()),
+            }),
+        },
     }
 }
 

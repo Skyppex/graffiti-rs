@@ -1,6 +1,6 @@
 use tokio::sync::mpsc;
 
-use crate::ppp;
+use crate::ppp::{self, method};
 
 /// What the session knows about one connected link.
 pub struct Peer {
@@ -34,14 +34,42 @@ pub enum PeerMessage {
     Notification(PppNotification),
 }
 
+impl PeerMessage {
+    /// The wire method name this message carries, straight from the ppp
+    /// vocabulary the codec speaks.
+    pub fn method(&self) -> &'static str {
+        match self {
+            PeerMessage::Request { request, .. } => request.method(),
+            PeerMessage::Response { response, .. } => response.method(),
+            PeerMessage::Notification(notification) => notification.method(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum PppRequest {
     Initialize(ppp::InitializeRequest),
 }
 
+impl PppRequest {
+    pub fn method(&self) -> &'static str {
+        match self {
+            PppRequest::Initialize(_) => method::INITIALIZE,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum PppResponse {
     Initialize(ppp::InitializeResponse),
+}
+
+impl PppResponse {
+    pub fn method(&self) -> &'static str {
+        match self {
+            PppResponse::Initialize(_) => method::INITIALIZE,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -51,4 +79,16 @@ pub enum PppNotification {
     InitialFileUri(ppp::InitialFileNotification),
     CursorMoved(ppp::CursorMovedNotification),
     DocumentEditFull(ppp::DocumentEditFullNotification),
+}
+
+impl PppNotification {
+    pub fn method(&self) -> &'static str {
+        match self {
+            PppNotification::Initialized(_) => method::INITIALIZED,
+            PppNotification::DirectoriesUpload(_) => method::DIRECTORIES_UPLOAD,
+            PppNotification::InitialFileUri(_) => method::INITIAL_FILE_URI,
+            PppNotification::CursorMoved(_) => method::CURSOR_MOVED,
+            PppNotification::DocumentEditFull(_) => method::DOCUMENT_EDIT,
+        }
+    }
 }
