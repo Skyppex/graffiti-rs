@@ -399,22 +399,20 @@ impl Session {
                 info!("moving to directory: {}", new_cwd.to_string_lossy());
 
                 tokio::fs::create_dir_all(&new_cwd).await?;
-                state.set_cwd(new_cwd);
+                state.set_cwd(new_cwd.clone());
                 state.set_client_id(result.client_id.clone());
                 drop(state);
+
+                self.to_editor(EditorOutbound::Request(CspRequest::ChangeCwd {
+                    cwd: new_cwd,
+                }))
+                .await?;
 
                 info!("my client id is {}", result.client_id);
 
                 if let Some(peer) = self.peers.get_mut(&from) {
                     peer.initialized = true;
                 }
-
-                self.to_editor(EditorOutbound::Notification(
-                    CspNotification::ClientIdChanged {
-                        client_id: result.client_id.clone(),
-                    },
-                ))
-                .await?;
 
                 self.to_editor(EditorOutbound::Notification(
                     CspNotification::ClientIdChanged {
@@ -468,6 +466,17 @@ impl Session {
                         )),
                     )
                     .await?;
+
+                    self.send_to(
+                        &from,
+                        PeerMessage::Notification(PppNotification::CursorMoved(
+                            ppp::CursorMovedNotification {
+                                client_id: self.client_id,
+                                location: (),
+                            },
+                        )),
+                    )
+                    .await?;
                 } else {
                     info!("No initial file URI found");
                 }
@@ -502,8 +511,6 @@ impl Session {
             }
             PppNotification::InitialFileUri(params) => {
                 info!("Received initial_file_uri notification");
-
-                let cwd = self.state.lock().await.get_cwd();
 
                 self.to_editor(EditorOutbound::Request(CspRequest::InitialFileUri {
                     initial_file_uri: params.uri,
