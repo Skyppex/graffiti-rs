@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     csp, rpc,
     session::peer::{PeerMessage, PppNotification, PppRequest, PppResponse},
-    DynResult,
+    state, DynResult,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +101,15 @@ impl From<csp::DocumentLocation> for DocumentLocation {
 
 impl From<csp::DocumentPosition> for DocumentPosition {
     fn from(pos: csp::DocumentPosition) -> Self {
+        Self {
+            line: pos.line,
+            column: pos.column,
+        }
+    }
+}
+
+impl From<state::DocumentPosition> for DocumentPosition {
+    fn from(pos: state::DocumentPosition) -> Self {
         Self {
             line: pos.line,
             column: pos.column,
@@ -292,15 +301,14 @@ mod tests {
 
     #[tokio::test]
     async fn notification_roundtrip() {
-        let original = PeerMessage::Notification(PppNotification::CursorMoved(
-            CursorMovedNotification {
+        let original =
+            PeerMessage::Notification(PppNotification::CursorMoved(CursorMovedNotification {
                 client_id: "2".into(),
                 location: DocumentLocation {
                     uri: PathBuf::from("src/main.rs"),
                     pos: DocumentPosition { line: 4, column: 7 },
                 },
-            },
-        ));
+            }));
 
         let decoded = decode(&encode(&original).unwrap()).await.unwrap();
 

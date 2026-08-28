@@ -8,7 +8,7 @@ use tokio::{
     io::AsyncWriteExt,
     sync::{mpsc, Mutex},
 };
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::{
     csp,
@@ -451,13 +451,13 @@ impl Session {
 
                 let location = self.state.lock().await.get_my_location().cloned();
 
-                if let Some(state::DocumentLocation { uri, .. }) = location {
+                if let Some(state::DocumentLocation { uri, pos }) = location {
                     info!("Sending initial file URI: {:?}", uri);
 
                     self.send_to(
                         &from,
                         PeerMessage::Notification(PppNotification::InitialFileUri(
-                            ppp::InitialFileNotification { uri },
+                            ppp::InitialFileNotification { uri: uri.clone() },
                         )),
                     )
                     .await?;
@@ -633,10 +633,16 @@ impl Session {
             let mut directories = Vec::new();
 
             for path in batch {
-                let (type_, content) = if path.is_dir() {
-                    (ppp::DirectoryType::Directory, vec![])
-                } else {
-                    (ppp::DirectoryType::File, tokio::fs::read(path).await?)
+                let (type_, content) = match tokio::fs::canonicalize(path).await {
+                    Ok(p) if p.is_dir() => (ppp::DirectoryType::Directory, vec![]),
+                    Ok(p) if p.is_file() => {
+                        (ppp::DirectoryType::File, tokio::fs::read(path).await?)
+                    }
+                    Ok(p) if p.is_symlink() => {
+                        unreachable!("path is canonicalized so the path should never be a symlink at this stage")
+                    }
+                    Err(_) => continue,
+                    Ok(p) => panic!("unexpected path value {:?}", p),
                 };
 
                 directories.push(ppp::Directory {
