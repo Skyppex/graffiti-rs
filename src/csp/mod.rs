@@ -91,8 +91,12 @@ pub struct ClientIdChangedNotification {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct InitialFileUriRequest {
+pub struct ChangeCwdRequest {
     pub cwd: PathBuf,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct InitialFileUriRequest {
     pub initial_file_uri: PathBuf,
 }
 
@@ -288,17 +292,18 @@ pub fn encode(message: EditorOutbound) -> DynResult<Vec<u8>> {
                 method: "shutdown".into(),
                 params: None,
             }),
-            CspRequest::InitialFileUri {
-                cwd,
-                initial_file_uri,
-            } => rpc::encode(Request::<InitialFileUriRequest> {
+            CspRequest::ChangeCwd { cwd } => rpc::encode(Request::<ChangeCwdRequest> {
                 id: Some(next_request_id()),
-                method: "initial_file_uri".into(),
-                params: Some(InitialFileUriRequest {
-                    cwd,
-                    initial_file_uri,
-                }),
+                method: "change_cwd".into(),
+                params: Some(ChangeCwdRequest { cwd }),
             }),
+            CspRequest::InitialFileUri { initial_file_uri } => {
+                rpc::encode(Request::<InitialFileUriRequest> {
+                    id: Some(next_request_id()),
+                    method: "initial_file_uri".into(),
+                    params: Some(InitialFileUriRequest { initial_file_uri }),
+                })
+            }
         },
         EditorOutbound::Notification(notification) => match notification {
             CspNotification::FingerprintGenerated { fingerprint } => {

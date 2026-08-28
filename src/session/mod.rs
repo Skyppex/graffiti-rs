@@ -416,6 +416,13 @@ impl Session {
                 ))
                 .await?;
 
+                self.to_editor(EditorOutbound::Notification(
+                    CspNotification::ClientIdChanged {
+                        client_id: result.client_id.clone(),
+                    },
+                ))
+                .await?;
+
                 self.send_to(
                     &from,
                     PeerMessage::Notification(PppNotification::Initialized(
@@ -451,7 +458,7 @@ impl Session {
 
                 let location = self.state.lock().await.get_my_location().cloned();
 
-                if let Some(state::DocumentLocation { uri, pos }) = location {
+                if let Some(state::DocumentLocation { uri, .. }) = location {
                     info!("Sending initial file URI: {:?}", uri);
 
                     self.send_to(
@@ -499,7 +506,6 @@ impl Session {
                 let cwd = self.state.lock().await.get_cwd();
 
                 self.to_editor(EditorOutbound::Request(CspRequest::InitialFileUri {
-                    cwd,
                     initial_file_uri: params.uri,
                 }))
                 .await?;

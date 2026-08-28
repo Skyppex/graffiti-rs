@@ -52,10 +52,8 @@ pub enum EditorOutbound {
 pub enum CspRequest {
     Location,
     Shutdown,
-    InitialFileUri {
-        cwd: PathBuf,
-        initial_file_uri: PathBuf,
-    },
+    InitialFileUri { initial_file_uri: PathBuf },
+    ChangeCwd { cwd: PathBuf },
 }
 
 #[derive(Debug)]
