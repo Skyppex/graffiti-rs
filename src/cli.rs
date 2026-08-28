@@ -1,6 +1,7 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, str::FromStr};
 
 use clap::{ArgGroup, Parser, Subcommand};
+use tracing::level_filters::LevelFilter;
 
 use crate::path_utils::get_path;
 
@@ -15,11 +16,26 @@ pub struct Cli {
     #[arg(short, long)]
     pub log_to_stderr: bool,
 
+    /// Minimum level for graffiti's own logs: trace, debug, info, warn, error, off.
+    /// Imported crates stay at warn unless overridden with --log-filter
+    #[arg(long, default_value = "debug", value_parser = parse_level_filter)]
+    pub log_level: LevelFilter,
+
+    /// Extra log filter directives in tracing's EnvFilter syntax, applied on
+    /// top of the defaults. E.g. "russh=info" or "russh=trace,tokio_tungstenite=debug"
+    #[arg(long)]
+    pub log_filter: Option<String>,
+
     #[arg(long)]
     pub graffitiignore: Option<PathBuf>,
 
     #[command(subcommand)]
     pub command: Commands,
+}
+
+fn parse_level_filter(value: &str) -> Result<LevelFilter, String> {
+    LevelFilter::from_str(value)
+        .map_err(|_| format!("unknown log level '{value}', expected one of: trace, debug, info, warn, error, off"))
 }
 
 #[derive(Debug, Clone, Subcommand)]
