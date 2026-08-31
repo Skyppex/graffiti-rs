@@ -5,7 +5,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
     sync::mpsc,
 };
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
     id::next_client_id,
@@ -32,29 +32,47 @@ pub async fn run_host(
     // its own: the session owns its identity, the network borrows it
     let identity = session
         .identity()
-        .cloned()
         .ok_or("net::run_host requires a host session")?;
 
     let listener = TcpListener::bind(("0.0.0.0", BOOTSTRAP_PORT)).await?;
     info!("Listening on 0.0.0.0:{}", BOOTSTRAP_PORT);
 
-    let (mut socket, peer_addr) = listener.accept().await?;
-    info!("bootstrap connection from {}", peer_addr);
+    loop {
+        let Ok((mut socket, peer_addr)) = listener.accept().await else {
+            warn!("listening failed somehow");
+            continue;
+        };
 
-    let protocol = bootstrap::negotiate_host(&mut socket).await?;
-    info!("negotiated protocol: {:?}", protocol);
+        info!("bootstrap connection from {}", peer_addr);
 
-    let connection = match protocol {
-        Protocol::Ssh => Connection::ssh_host(socket, identity, authorized_keys).await?,
-        // negotiate_host refuses unimplemented protocols before picking them
-        Protocol::Wss => unreachable!("wss has no upgrade path yet"),
-    };
+        let Ok(protocol) = bootstrap::negotiate_host(&mut socket).await else {
+            warn!("bootstrap failed for {}", peer_addr);
+            continue;
+        };
 
-    info!("connection established");
+        info!("negotiated protocol: {:?}", protocol);
 
-    // the host allocates the client_id at accept time, so the link and the
-    // author it carries share one identity from the first frame
-    run_link(PeerId::Client(next_client_id()), connection, &session).await
+        let Ok(connection) = (match protocol {
+            Protocol::Ssh => {
+                Connection::ssh_host(socket, identity.clone(), authorized_keys.clone()).await
+            }
+            // negotiate_host refuses unimplemented protocols before picking them
+            Protocol::Wss => unreachable!("wss has no upgrade path yet"),
+        }) else {
+            warn!("failed to upgrade protocol {}", peer_addr);
+            continue;
+        };
+
+        info!("connection established, spawning link");
+
+        // the host allocates the client_id at accept time, so the link and the
+        // author it carries share one identity from the first frame
+        tokio::spawn(run_link(
+            PeerId::Client(next_client_id()),
+            connection,
+            session.clone(),
+        ));
+    }
 }
 
 pub async fn run_client(
@@ -83,19 +101,21 @@ pub async fn run_client(
     info!("negotiated protocol: {:?}", protocol);
 
     let connection = match protocol {
-        Protocol::Ssh => Connection::ssh_client(socket, expected_fingerprint, client_key_path).await?,
+        Protocol::Ssh => {
+            Connection::ssh_client(socket, expected_fingerprint, client_key_path).await?
+        }
         Protocol::Wss => return Err("wss transport not implemented yet".into()),
     };
 
     info!("connection established");
 
-    run_link(PeerId::Host, connection, &session).await
+    run_link(PeerId::Host, connection, session).await
 }
 
 /// Owns one connection for its whole life: decodes every inbound frame into
 /// the session's inbox, drains the session's outbound channel onto the wire.
 /// The session closing that channel (dropping the peer) is the close signal.
-async fn run_link(id: PeerId, connection: Connection, session: &SessionHandle) -> DynResult<()> {
+async fn run_link(id: PeerId, connection: Connection, session: SessionHandle) -> DynResult<()> {
     let (mut peer_writer, mut peer_reader) = connection.split();
     let (link_sender, mut session_receiver) = mpsc::channel::<PeerMessage>(8);
 
