@@ -25,7 +25,7 @@ impl State {
             cwd,
             custom_ignore_file,
             remote_projects_path: None,
-            client_id: "0".to_owned(),
+            client_id: "1".to_owned(),
             client_locations: HashMap::new(),
             file_hashes: HashMap::new(),
         }))

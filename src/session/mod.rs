@@ -181,6 +181,16 @@ impl Session {
         );
         self.open_links += 1;
 
+        if let PeerId::Client(client_id) = &id {
+            self.broadcast(
+                PppNotification::PeerConnected(ppp::PeerConnectedNotification {
+                    client_id: client_id.clone(),
+                }),
+                Some(&id),
+            )
+            .await?;
+        };
+
         // the client starts the handshake as soon as its link to the host is up
         if !self.is_host() {
             let request = PeerMessage::Request {
@@ -207,7 +217,26 @@ impl Session {
         self.peers.remove(&id);
         self.open_links = self.open_links.saturating_sub(1);
 
+        if let PeerId::Client(client_id) = &id {
+            self.broadcast(
+                PppNotification::PeerDisconnected(ppp::PeerDisconnectedNotification {
+                    client_id: client_id.clone(),
+                }),
+                Some(&id),
+            )
+            .await?;
+        };
+
         if self.open_links > 0 {
+            let PeerId::Client(client_id) = id else {
+                unreachable!("received client notification from non-client peer");
+            };
+
+            self.to_editor(EditorOutbound::Notification(
+                CspNotification::PeerDisconnected { client_id },
+            ))
+            .await?;
+
             return Ok(false);
         }
 
@@ -438,6 +467,13 @@ impl Session {
                 }
 
                 self.to_editor(EditorOutbound::Notification(
+                    CspNotification::PeerConnected {
+                        client_id: "1".into(),
+                    },
+                ))
+                .await?;
+
+                self.to_editor(EditorOutbound::Notification(
                     CspNotification::ClientIdChanged {
                         client_id: result.client_id.clone(),
                     },
@@ -475,6 +511,17 @@ impl Session {
                     peer.initialized = true;
                 }
 
+                let PeerId::Client(client_id) = &from else {
+                    unreachable!("received client notification from non-client peer");
+                };
+
+                self.to_editor(EditorOutbound::Notification(
+                    CspNotification::PeerConnected {
+                        client_id: client_id.to_owned(),
+                    },
+                ))
+                .await?;
+
                 self.upload_project(&from, params.client_id).await?;
 
                 let location = self.state.lock().await.get_my_location().cloned();
@@ -506,6 +553,26 @@ impl Session {
                 } else {
                     info!("No initial file URI found");
                 }
+            }
+            PppNotification::PeerConnected(params) => {
+                info!("Received peer_connected notification");
+
+                self.to_editor(EditorOutbound::Notification(
+                    CspNotification::PeerConnected {
+                        client_id: params.client_id,
+                    },
+                ))
+                .await?;
+            }
+            PppNotification::PeerDisconnected(params) => {
+                info!("Received peer_disconnected notification");
+
+                self.to_editor(EditorOutbound::Notification(
+                    CspNotification::PeerDisconnected {
+                        client_id: params.client_id,
+                    },
+                ))
+                .await?;
             }
             PppNotification::DirectoriesUpload(params) => {
                 info!("Received directories/upload notification");
@@ -614,6 +681,10 @@ impl Session {
         notification: PppNotification,
         exclude: Option<&PeerId>,
     ) -> DynResult<()> {
+        if !self.is_host() {
+            return Ok(());
+        }
+
         for (id, peer) in &self.peers {
             if Some(id) == exclude || !peer.initialized {
                 continue;
@@ -779,6 +850,7 @@ mod tests {
             .send(SessionEvent::PeerConnected(a.clone(), a_link_sender))
             .await
             .unwrap();
+
         handle
             .send(SessionEvent::PeerConnected(b.clone(), b_link_sender))
             .await

@@ -79,6 +79,8 @@ pub enum PppNotification {
     InitialFileUri(ppp::InitialFileNotification),
     CursorMoved(ppp::CursorMovedNotification),
     DocumentEditFull(ppp::DocumentEditFullNotification),
+    PeerConnected(ppp::PeerConnectedNotification),
+    PeerDisconnected(ppp::PeerDisconnectedNotification),
 }
 
 impl PppNotification {
@@ -89,6 +91,8 @@ impl PppNotification {
             PppNotification::InitialFileUri(_) => method::INITIAL_FILE_URI,
             PppNotification::CursorMoved(_) => method::CURSOR_MOVED,
             PppNotification::DocumentEditFull(_) => method::DOCUMENT_EDIT,
+            PppNotification::PeerConnected(_) => method::DOCUMENT_EDIT,
+            PppNotification::PeerDisconnected(_) => method::DOCUMENT_EDIT,
         }
     }
 }

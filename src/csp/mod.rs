@@ -89,6 +89,16 @@ pub struct ClientIdChangedNotification {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct PeerConnectedNotification {
+    pub client_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PeerDisconnectedNotification {
+    pub client_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ChangeCwdRequest {
     pub cwd: PathBuf,
 }
@@ -305,6 +315,18 @@ pub fn encode(message: EditorOutbound) -> DynResult<Vec<u8>> {
             }
         },
         EditorOutbound::Notification(notification) => match notification {
+            CspNotification::PeerConnected { client_id } => {
+                rpc::encode(Notification::<PeerConnectedNotification> {
+                    method: "peer_connected".into(),
+                    params: Some(PeerConnectedNotification { client_id }),
+                })
+            }
+            CspNotification::PeerDisconnected { client_id } => {
+                rpc::encode(Notification::<PeerDisconnectedNotification> {
+                    method: "peer_disconnected".into(),
+                    params: Some(PeerDisconnectedNotification { client_id }),
+                })
+            }
             CspNotification::ClientIdChanged { client_id } => {
                 rpc::encode(Notification::<ClientIdChangedNotification> {
                     method: "client_id_changed".into(),

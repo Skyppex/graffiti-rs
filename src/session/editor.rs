@@ -70,6 +70,12 @@ pub enum CspResponse {
 
 #[derive(Debug)]
 pub enum CspNotification {
+    PeerConnected {
+        client_id: String,
+    },
+    PeerDisconnected {
+        client_id: String,
+    },
     ClientIdChanged {
         client_id: String,
     },

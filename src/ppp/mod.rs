@@ -73,6 +73,16 @@ pub struct ShutdownRequest;
 pub struct ShutdownResponse;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerConnectedNotification {
+    pub client_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerDisconnectedNotification {
+    pub client_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CursorMovedNotification {
     pub client_id: String,
     pub location: DocumentLocation,
@@ -186,6 +196,8 @@ pub mod method {
     pub const INITIAL_FILE_URI: &str = "initial_file_uri";
     pub const CURSOR_MOVED: &str = "cursor_moved";
     pub const DOCUMENT_EDIT: &str = "document/edit";
+    pub const PEER_CONNECTED: &str = "peer_connected";
+    pub const PEER_DISCONNECTED: &str = "peer_disconnected";
 }
 
 // ─── wire codec ──────────────────────────────────────────────────────────
@@ -272,6 +284,14 @@ pub fn encode(message: &PeerMessage) -> DynResult<Vec<u8>> {
         },
         PeerMessage::Notification(notification) => match notification {
             PppNotification::Initialized(params) => rpc::encode(Notification {
+                method,
+                params: Some(params.clone()),
+            }),
+            PppNotification::PeerConnected(params) => rpc::encode(Notification {
+                method,
+                params: Some(params.clone()),
+            }),
+            PppNotification::PeerDisconnected(params) => rpc::encode(Notification {
                 method,
                 params: Some(params.clone()),
             }),
