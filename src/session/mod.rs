@@ -10,7 +10,7 @@ use tokio::{
     sync::{mpsc, Mutex},
 };
 
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::{
     csp,
@@ -24,6 +24,7 @@ use crate::{
     DynResult,
 };
 
+#[derive(Debug)]
 pub enum Role {
     Host,   // The peer which is hosting the session and "owns" the repo
     Client, // The peer which is connecting and downloading the repo from the host
@@ -34,7 +35,10 @@ pub enum Role {
 /// map and all protocol logic; knows nothing about transports or wire
 /// formats — only typed messages cross its boundary, in either direction.
 pub struct Session {
-    role: Role,
+    /// Who this session is on the wire. The host knows from the start; a
+    /// client only learns its id from the host's initialize response, so
+    /// until then this holds a provisional value.
+    me: PeerId,
     state: Arc<Mutex<State>>,
     peers: HashMap<PeerId, Peer>,
     open_links: usize,
@@ -77,6 +81,7 @@ pub enum SessionEvent {
 }
 
 impl Session {
+    // all peers
     pub async fn new(
         role: Role,
         state: Arc<Mutex<State>>,
@@ -106,9 +111,14 @@ impl Session {
             panic!("failed to generate session token");
         };
 
+        let my_peer_id = match role {
+            Role::Host => PeerId::Host,
+            Role::Client => PeerId::Client(1),
+        };
+
         Ok((
             Session {
-                role,
+                me: my_peer_id,
                 state,
                 peers: HashMap::new(),
                 open_links: 0,
@@ -125,10 +135,12 @@ impl Session {
         ))
     }
 
+    // all peers
     fn is_host(&self) -> bool {
-        matches!(self.role, Role::Host)
+        matches!(self.me, PeerId::Host)
     }
 
+    // all peers
     /// Runs the session to completion. Returns true when it ended through the
     /// shutdown flow rather than by surprise.
     pub async fn run(mut self) -> bool {
@@ -146,11 +158,17 @@ impl Session {
         self.shutting_down
     }
 
+    // all peers
     async fn handle_event(&mut self, event: SessionEvent) -> DynResult<bool> {
         match event {
             SessionEvent::FromEditor(message) => self.handle_editor_message(message).await,
             SessionEvent::FromPeer(from, message) => {
-                info!("Received from peer {:?}: {}", from, message.method());
+                info!(
+                    "{} received from peer {:?}: {}",
+                    self.me,
+                    from,
+                    message.method()
+                );
                 self.handle_peer_message(from, message).await?;
                 Ok(false)
             }
@@ -165,6 +183,7 @@ impl Session {
 
     // ─── lifecycle ───────────────────────────────────────────────────────
 
+    // all peers
     async fn handle_peer_connected(
         &mut self,
         id: PeerId,
@@ -173,7 +192,7 @@ impl Session {
         info!("Peer connected: {:?}", id);
 
         self.peers.insert(
-            id.clone(),
+            id,
             Peer {
                 link_sender,
                 initialized: false,
@@ -207,7 +226,26 @@ impl Session {
         self.peers.remove(&id);
         self.open_links = self.open_links.saturating_sub(1);
 
+        if let PeerId::Client(client_id) = &id {
+            self.broadcast(
+                PppNotification::PeerDisconnected(ppp::PeerDisconnectedNotification {
+                    client_id: *client_id,
+                }),
+                Some(&id),
+            )
+            .await?;
+        };
+
         if self.open_links > 0 {
+            let PeerId::Client(client_id) = id else {
+                unreachable!("received client notification from non-client peer");
+            };
+
+            self.to_editor(EditorOutbound::Notification(
+                CspNotification::PeerDisconnected { client_id },
+            ))
+            .await?;
+
             return Ok(false);
         }
 
@@ -259,7 +297,7 @@ impl Session {
                         }
                     }
 
-                    (state.client_id.clone(), self.token.clone())
+                    (state.client_id, self.token.clone())
                 };
 
                 self.to_editor(EditorOutbound::Response {
@@ -287,7 +325,7 @@ impl Session {
                 let client_id = {
                     let mut state = self.state.lock().await;
                     state.set_my_location(location.clone());
-                    state.client_id.clone()
+                    state.client_id
                 };
 
                 self.broadcast(
@@ -310,7 +348,7 @@ impl Session {
                     }
 
                     state.set_file(uri.clone(), &content);
-                    let client_id = state.client_id.clone();
+                    let client_id = state.client_id;
                     drop(state);
 
                     self.broadcast(
@@ -383,7 +421,7 @@ impl Session {
                 info!("Received initialize request from client");
 
                 let client_id = match &from {
-                    PeerId::Client(id) => id.clone(),
+                    PeerId::Client(id) => *id,
                     PeerId::Host => return Err("initialize request from the host".into()),
                 };
 
@@ -423,8 +461,11 @@ impl Session {
 
                 tokio::fs::create_dir_all(&new_cwd).await?;
                 state.set_cwd(new_cwd.clone());
-                state.set_client_id(result.client_id.clone());
+                state.set_client_id(result.client_id);
                 drop(state);
+
+                // the host has now told us who we are
+                self.me = PeerId::Client(result.client_id);
 
                 self.to_editor(EditorOutbound::Request(CspRequest::ChangeCwd {
                     cwd: new_cwd,
@@ -438,8 +479,13 @@ impl Session {
                 }
 
                 self.to_editor(EditorOutbound::Notification(
+                    CspNotification::PeerConnected { client_id: 1 },
+                ))
+                .await?;
+
+                self.to_editor(EditorOutbound::Notification(
                     CspNotification::ClientIdChanged {
-                        client_id: result.client_id.clone(),
+                        client_id: result.client_id,
                     },
                 ))
                 .await?;
@@ -469,10 +515,59 @@ impl Session {
     ) -> DynResult<()> {
         match notification {
             PppNotification::Initialized(params) => {
-                info!("Received initialized notification from client");
+                info!(
+                    "{} received initialized notification from {}",
+                    self.me, from
+                );
 
                 if let Some(peer) = self.peers.get_mut(&from) {
                     peer.initialized = true;
+                }
+
+                let PeerId::Client(client_id) = from else {
+                    unreachable!("received client notification from non-client peer");
+                };
+
+                self.to_editor(EditorOutbound::Notification(
+                    CspNotification::PeerConnected {
+                        client_id: client_id.to_owned(),
+                    },
+                ))
+                .await?;
+
+                self.broadcast(
+                    PppNotification::PeerConnected(ppp::PeerConnectedNotification { client_id }),
+                    Some(&from),
+                )
+                .await?;
+
+                for id in self.peers.keys() {
+                    if id == &from {
+                        continue;
+                    }
+
+                    let PeerId::Client(peer_client_id) = *id else {
+                        continue;
+                    };
+
+                    debug!("notifying {} that {} exists", from, id);
+
+                    self.send_to(
+                        &from,
+                        PeerMessage::Notification(PppNotification::PeerExists(
+                            ppp::PeerExistsNotification {
+                                client_id: peer_client_id,
+                                location: self
+                                    .state
+                                    .lock()
+                                    .await
+                                    .get_client_location(&peer_client_id)
+                                    .cloned()
+                                    .map(|l| l.into()),
+                            },
+                        )),
+                    )
+                    .await?;
                 }
 
                 self.upload_project(&from, params.client_id).await?;
@@ -494,7 +589,7 @@ impl Session {
                         &from,
                         PeerMessage::Notification(PppNotification::CursorMoved(
                             ppp::CursorMovedNotification {
-                                client_id: self.state.lock().await.client_id.clone(),
+                                client_id: self.state.lock().await.client_id,
                                 location: ppp::DocumentLocation {
                                     uri,
                                     pos: pos.into(),
@@ -506,6 +601,35 @@ impl Session {
                 } else {
                     info!("No initial file URI found");
                 }
+            }
+            PppNotification::PeerConnected(params) => {
+                info!("Received peer_connected notification");
+
+                self.to_editor(EditorOutbound::Notification(
+                    CspNotification::PeerConnected {
+                        client_id: params.client_id,
+                    },
+                ))
+                .await?;
+            }
+            PppNotification::PeerExists(params) => {
+                info!("Received peer_exists notification");
+
+                self.to_editor(EditorOutbound::Notification(CspNotification::PeerExists {
+                    client_id: params.client_id,
+                    location: params.location.map(|l| l.into()),
+                }))
+                .await?;
+            }
+            PppNotification::PeerDisconnected(params) => {
+                info!("Received peer_disconnected notification");
+
+                self.to_editor(EditorOutbound::Notification(
+                    CspNotification::PeerDisconnected {
+                        client_id: params.client_id,
+                    },
+                ))
+                .await?;
             }
             PppNotification::DirectoriesUpload(params) => {
                 info!("Received directories/upload notification");
@@ -544,13 +668,15 @@ impl Session {
                 .await?;
             }
             PppNotification::CursorMoved(params) => {
+                info!("Received cursor_moved notification");
+
                 self.state
                     .lock()
                     .await
-                    .set_client_location(params.client_id.clone(), params.location.clone().into());
+                    .set_client_location(params.client_id, params.location.clone().into());
 
                 self.to_editor(EditorOutbound::Notification(CspNotification::CursorMoved {
-                    client_id: params.client_id.clone(),
+                    client_id: params.client_id,
                     location: params.location.clone().into(),
                 }))
                 .await?;
@@ -573,7 +699,7 @@ impl Session {
 
                 self.to_editor(EditorOutbound::Notification(
                     CspNotification::DocumentEdited {
-                        client_id: params.client_id.clone(),
+                        client_id: params.client_id,
                         uri: full_uri,
                         content: params.content.clone(),
                     },
@@ -609,13 +735,25 @@ impl Session {
     /// is both "tell everyone what my editor did" (no exclusion) and the
     /// host's relay (excluding the originating link, so a message never
     /// returns to where it came from).
+    /// On the client, this only sends to the host.
     async fn broadcast(
         &self,
         notification: PppNotification,
         exclude: Option<&PeerId>,
     ) -> DynResult<()> {
         for (id, peer) in &self.peers {
+            debug!(
+                "{} is broadcasting {} to {:?}",
+                self.me,
+                notification.method(),
+                id
+            );
+
             if Some(id) == exclude || !peer.initialized {
+                continue;
+            }
+
+            if !self.is_host() && id != &PeerId::Host {
                 continue;
             }
 
@@ -629,7 +767,7 @@ impl Session {
     }
 
     /// Walks the project directory and uploads it to one peer in pages.
-    async fn upload_project(&self, to: &PeerId, client_id: String) -> DynResult<()> {
+    async fn upload_project(&self, to: &PeerId, client_id: usize) -> DynResult<()> {
         let (cwd, custom_ignore) = {
             let state = self.state.lock().await;
             (state.get_cwd(), state.get_ignore_file())
@@ -695,7 +833,7 @@ impl Session {
                 to,
                 PeerMessage::Notification(PppNotification::DirectoriesUpload(
                     ppp::DirectoriesUploadNotification {
-                        client_id: client_id.clone(),
+                        client_id,
                         directories,
                     },
                 )),
@@ -748,7 +886,7 @@ mod tests {
                 response: CspResponse::Initialize { client_id, token },
             } => {
                 assert_eq!(req_id, "1");
-                assert_eq!(client_id, "0");
+                assert_eq!(client_id, 0);
 
                 // the initialize response is where the editor learns the token:
                 // it must round-trip back into a token and an address
@@ -772,27 +910,26 @@ mod tests {
 
         let (a_link_sender, mut a_link_receiver) = mpsc::channel(8);
         let (b_link_sender, mut b_link_receiver) = mpsc::channel(8);
-        let a = PeerId::Client("1".into());
-        let b = PeerId::Client("2".into());
+        let a = PeerId::Client(1);
+        let b = PeerId::Client(2);
 
         handle
-            .send(SessionEvent::PeerConnected(a.clone(), a_link_sender))
+            .send(SessionEvent::PeerConnected(a, a_link_sender))
             .await
             .unwrap();
+
         handle
-            .send(SessionEvent::PeerConnected(b.clone(), b_link_sender))
+            .send(SessionEvent::PeerConnected(b, b_link_sender))
             .await
             .unwrap();
 
         // both peers finish their handshake
-        for id in ["1", "2"] {
+        for id in [1, 2] {
             handle
                 .send(SessionEvent::FromPeer(
-                    PeerId::Client(id.into()),
+                    PeerId::Client(id),
                     PeerMessage::Notification(PppNotification::Initialized(
-                        ppp::InitializedNotification {
-                            client_id: id.into(),
-                        },
+                        ppp::InitializedNotification { client_id: id },
                     )),
                 ))
                 .await
@@ -802,10 +939,10 @@ mod tests {
         // act: a cursor move arrives from peer A
         handle
             .send(SessionEvent::FromPeer(
-                a.clone(),
+                a,
                 PeerMessage::Notification(PppNotification::CursorMoved(
                     ppp::CursorMovedNotification {
-                        client_id: "1".into(),
+                        client_id: 1,
                         location: ppp::DocumentLocation {
                             uri: PathBuf::from("file.txt"),
                             pos: ppp::DocumentPosition { line: 1, column: 2 },
@@ -820,7 +957,7 @@ mod tests {
         let relayed = b_link_receiver.recv().await.unwrap();
         match relayed {
             PeerMessage::Notification(PppNotification::CursorMoved(params)) => {
-                assert_eq!(params.client_id, "1");
+                assert_eq!(params.client_id, 1);
             }
             other => panic!("expected a relayed cursor move, got {:?}", other),
         }

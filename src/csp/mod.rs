@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     id::next_request_id,
-    ppp, rpc,
+    ppp::{self, PeerExistsNotification},
+    rpc,
     session::editor::{CspNotification, CspRequest, CspResponse, EditorInbound, EditorOutbound},
     DynResult,
 };
@@ -51,7 +52,7 @@ pub struct InitializeOptions {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct InitializeResponse {
     pub server_info: Option<ServerInfo>,
-    pub client_id: String,
+    pub client_id: usize,
     /// The session's out-of-band token: a token the editor shows the
     /// user to hand to whoever wants to join.
     pub token: Option<String>,
@@ -85,7 +86,17 @@ pub struct SessionTokenResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ClientIdChangedNotification {
-    pub client_id: String,
+    pub client_id: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PeerConnectedNotification {
+    pub client_id: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PeerDisconnectedNotification {
+    pub client_id: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -105,7 +116,7 @@ pub struct MoveCursorNotification {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CursorMovedNotification {
-    pub client_id: String,
+    pub client_id: usize,
     pub location: DocumentLocation,
 }
 
@@ -174,7 +185,7 @@ pub struct DocumentEditIncremental {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DocumentEditedFull {
-    pub client_id: String,
+    pub client_id: usize,
     pub mode: DocumentEditMode,
     pub uri: PathBuf,
     pub content: String,
@@ -182,7 +193,7 @@ pub struct DocumentEditedFull {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DocumentEditedIncremental {
-    pub client_id: String,
+    pub client_id: usize,
     pub mode: DocumentEditMode,
     pub uri: PathBuf,
     pub start: DocumentPosition,
@@ -305,6 +316,28 @@ pub fn encode(message: EditorOutbound) -> DynResult<Vec<u8>> {
             }
         },
         EditorOutbound::Notification(notification) => match notification {
+            CspNotification::PeerConnected { client_id } => {
+                rpc::encode(Notification::<PeerConnectedNotification> {
+                    method: "peer_connected".into(),
+                    params: Some(PeerConnectedNotification { client_id }),
+                })
+            }
+            CspNotification::PeerExists {
+                client_id,
+                location,
+            } => rpc::encode(Notification::<PeerExistsNotification> {
+                method: "peer_exists".into(),
+                params: Some(PeerExistsNotification {
+                    client_id,
+                    location: location.map(|l| l.into()),
+                }),
+            }),
+            CspNotification::PeerDisconnected { client_id } => {
+                rpc::encode(Notification::<PeerDisconnectedNotification> {
+                    method: "peer_disconnected".into(),
+                    params: Some(PeerDisconnectedNotification { client_id }),
+                })
+            }
             CspNotification::ClientIdChanged { client_id } => {
                 rpc::encode(Notification::<ClientIdChangedNotification> {
                     method: "client_id_changed".into(),

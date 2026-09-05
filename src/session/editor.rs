@@ -59,7 +59,7 @@ pub enum CspRequest {
 #[derive(Debug)]
 pub enum CspResponse {
     Initialize {
-        client_id: String,
+        client_id: usize,
         token: Option<String>,
     },
     Shutdown,
@@ -70,15 +70,25 @@ pub enum CspResponse {
 
 #[derive(Debug)]
 pub enum CspNotification {
+    PeerConnected {
+        client_id: usize,
+    },
+    PeerExists {
+        client_id: usize,
+        location: Option<csp::DocumentLocation>,
+    },
+    PeerDisconnected {
+        client_id: usize,
+    },
     ClientIdChanged {
-        client_id: String,
+        client_id: usize,
     },
     CursorMoved {
-        client_id: String,
+        client_id: usize,
         location: csp::DocumentLocation,
     },
     DocumentEdited {
-        client_id: String,
+        client_id: usize,
         uri: PathBuf,
         content: String,
     },

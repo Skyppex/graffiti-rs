@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use tokio::sync::mpsc;
 
 use crate::ppp::{self, method};
@@ -12,10 +14,19 @@ pub struct Peer {
 /// Identity of a link, not an author. On the host this is the client_id
 /// allocated when the connection is accepted; on the client there is exactly
 /// one link: the host.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PeerId {
-    Host,           // The peer which is hosting the session and "owns" the repo
-    Client(String), // The peer which is connecting and downloading the repo from the host
+    Host,          // The peer which is hosting the session and "owns" the repo
+    Client(usize), // The peer which is connecting and downloading the repo from the host
+}
+
+impl Display for PeerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Host => write!(f, "Host"),
+            Self::Client(id) => write!(f, "Client({})", id),
+        }
+    }
 }
 
 /// A typed PPP message. Direction is implicit: arriving in
@@ -79,6 +90,9 @@ pub enum PppNotification {
     InitialFileUri(ppp::InitialFileNotification),
     CursorMoved(ppp::CursorMovedNotification),
     DocumentEditFull(ppp::DocumentEditFullNotification),
+    PeerConnected(ppp::PeerConnectedNotification),
+    PeerExists(ppp::PeerExistsNotification),
+    PeerDisconnected(ppp::PeerDisconnectedNotification),
 }
 
 impl PppNotification {
@@ -89,6 +103,9 @@ impl PppNotification {
             PppNotification::InitialFileUri(_) => method::INITIAL_FILE_URI,
             PppNotification::CursorMoved(_) => method::CURSOR_MOVED,
             PppNotification::DocumentEditFull(_) => method::DOCUMENT_EDIT,
+            PppNotification::PeerConnected(_) => method::PEER_CONNECTED,
+            PppNotification::PeerExists(_) => method::PEER_EXISTS,
+            PppNotification::PeerDisconnected(_) => method::PEER_DISCONNECTED,
         }
     }
 }

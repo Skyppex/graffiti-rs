@@ -14,8 +14,8 @@ pub struct State {
     cwd: PathBuf,
     custom_ignore_file: Option<PathBuf>,
     remote_projects_path: Option<PathBuf>,
-    pub client_id: String,
-    client_locations: HashMap<String, DocumentLocation>,
+    pub client_id: usize,
+    client_locations: HashMap<usize, DocumentLocation>,
     file_hashes: HashMap<PathBuf, u64>,
 }
 
@@ -25,13 +25,13 @@ impl State {
             cwd,
             custom_ignore_file,
             remote_projects_path: None,
-            client_id: "0".to_owned(),
+            client_id: 1,
             client_locations: HashMap::new(),
             file_hashes: HashMap::new(),
         }))
     }
 
-    pub fn set_client_id(&mut self, client_id: String) {
+    pub fn set_client_id(&mut self, client_id: usize) {
         self.client_id = client_id;
     }
 
@@ -66,7 +66,7 @@ impl State {
         self.custom_ignore_file.clone()
     }
 
-    pub fn _get_client_location(&self, client_id: &str) -> Option<&DocumentLocation> {
+    pub fn get_client_location(&self, client_id: &usize) -> Option<&DocumentLocation> {
         self.client_locations.get(client_id)
     }
 
@@ -74,13 +74,13 @@ impl State {
         self.client_locations.get(&self.client_id)
     }
 
-    pub fn set_client_location(&mut self, client_id: String, location: DocumentLocation) {
+    pub fn set_client_location(&mut self, client_id: usize, location: DocumentLocation) {
         self.client_locations.insert(client_id, location);
     }
 
     pub fn set_my_location<T: Into<DocumentLocation>>(&mut self, location: T) {
         self.client_locations
-            .insert(self.client_id.clone(), location.into());
+            .insert(self.client_id, location.into());
     }
 
     pub fn set_file(&mut self, path: PathBuf, content: &str) {

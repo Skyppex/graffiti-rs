@@ -120,7 +120,7 @@ async fn run_link(id: PeerId, connection: Connection, session: SessionHandle) ->
     let (link_sender, mut session_receiver) = mpsc::channel::<PeerMessage>(8);
 
     session
-        .send(SessionEvent::PeerConnected(id.clone(), link_sender))
+        .send(SessionEvent::PeerConnected(id, link_sender))
         .await?;
 
     loop {
@@ -130,7 +130,7 @@ async fn run_link(id: PeerId, connection: Connection, session: SessionHandle) ->
                     Some(Ok(Message::Data(data))) => match ppp::decode(&data).await {
                         Ok(message) => {
                             session
-                                .send(SessionEvent::FromPeer(id.clone(), message))
+                                .send(SessionEvent::FromPeer(id, message))
                                 .await?
                         }
                         Err(e) => info!("failed to decode peer message: {}", e),
