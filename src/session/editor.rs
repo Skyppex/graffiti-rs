@@ -1,18 +1,30 @@
 use std::path::PathBuf;
 
-use crate::csp;
+use crate::{
+    csp::{
+        self, ChangeCwdRequest, ClientIdChangedNotification, CursorMovedNotification,
+        DocumentEditedFull, InitialFileUriRequest, MoveCursorNotification,
+        PeerConnectedNotification, PeerDisconnectedNotification,
+    },
+    ppp::PeerExistsNotification,
+};
 
 /// A decoded CSP message from the editor. Produced by csp::decode in the
 /// editor endpoint task; the session only ever sees these.
 pub enum EditorInbound {
+    // requests
     Initialize {
         req_id: String,
         params: csp::InitializeRequest,
     },
-    Initialized,
-    MoveCursor {
-        location: csp::DocumentLocation,
+    RequestSessionToken {
+        req_id: String,
     },
+    Shutdown {
+        req_id: String,
+    },
+
+    // responses
     DocumentEditFull {
         uri: PathBuf,
         content: String,
@@ -20,13 +32,11 @@ pub enum EditorInbound {
     DocumentLocation {
         location: csp::DocumentLocation,
     },
+
+    // notifications
+    MoveCursor(MoveCursorNotification),
+    Initialized,
     CwdChanged,
-    RequestSessionToken {
-        req_id: String,
-    },
-    Shutdown {
-        req_id: String,
-    },
     Exit,
     Unknown {
         method: String,
@@ -38,22 +48,27 @@ pub enum EditorInbound {
 /// generated request ids, constant server info) live in the codec.
 #[derive(Debug)]
 pub enum EditorOutbound {
+    // requests
+    LocationRequest,
+    ShutdownRequest,
+    InitialFileUri(InitialFileUriRequest),
+    ChangeCwd(ChangeCwdRequest),
+
+    // response
     Response {
         req_id: String,
         response: CspResponse,
     },
-    Request(CspRequest),
-    Notification(CspNotification),
+
+    // notifications
+    PeerConnected(PeerConnectedNotification),
+    PeerExists(PeerExistsNotification),
+    PeerDisconnected(PeerDisconnectedNotification),
+    ClientIdChanged(ClientIdChangedNotification),
+    CursorMoved(CursorMovedNotification),
+    DocumentEditedFull(DocumentEditedFull),
     /// the legacy reply to a method we don't recognize
     UnknownMethod,
-}
-
-#[derive(Debug)]
-pub enum CspRequest {
-    Location,
-    Shutdown,
-    InitialFileUri { initial_file_uri: PathBuf },
-    ChangeCwd { cwd: PathBuf },
 }
 
 #[derive(Debug)]
@@ -65,31 +80,5 @@ pub enum CspResponse {
     Shutdown,
     SessionToken {
         token: String,
-    },
-}
-
-#[derive(Debug)]
-pub enum CspNotification {
-    PeerConnected {
-        client_id: usize,
-    },
-    PeerExists {
-        client_id: usize,
-        location: Option<csp::DocumentLocation>,
-    },
-    PeerDisconnected {
-        client_id: usize,
-    },
-    ClientIdChanged {
-        client_id: usize,
-    },
-    CursorMoved {
-        client_id: usize,
-        location: csp::DocumentLocation,
-    },
-    DocumentEdited {
-        client_id: usize,
-        uri: PathBuf,
-        content: String,
     },
 }

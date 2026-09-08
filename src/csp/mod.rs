@@ -6,7 +6,7 @@ use crate::{
     id::next_request_id,
     ppp::{self, PeerExistsNotification},
     rpc,
-    session::editor::{CspNotification, CspRequest, CspResponse, EditorInbound, EditorOutbound},
+    session::editor::{CspResponse, EditorInbound, EditorOutbound},
     DynResult,
 };
 
@@ -230,9 +230,9 @@ pub fn decode(message: &rpc::MessageInfo) -> DynResult<EditorInbound> {
         "initialized" => EditorInbound::Initialized,
         "move_cursor" => {
             let params: MoveCursorNotification = rpc::decode_params(&message.content)?;
-            EditorInbound::MoveCursor {
+            EditorInbound::MoveCursor(MoveCursorNotification {
                 location: params.location,
-            }
+            })
         }
         "document/edit" => {
             let mode: DocumentEditModeNotification = rpc::decode_params(&message.content)?;
@@ -291,83 +291,82 @@ pub fn encode(message: EditorOutbound) -> DynResult<Vec<u8>> {
                 result: Some(SessionTokenResponse { token }),
             }),
         },
-        EditorOutbound::Request(request) => match request {
-            CspRequest::Location => rpc::encode(Request::<LocationRequest> {
-                id: Some(next_request_id()),
-                method: "document/location".into(),
-                params: None,
-            }),
-            CspRequest::Shutdown => rpc::encode(Request::<ShutdownRequest> {
-                id: None,
-                method: "shutdown".into(),
-                params: None,
-            }),
-            CspRequest::ChangeCwd { cwd } => rpc::encode(Request::<ChangeCwdRequest> {
+        EditorOutbound::LocationRequest => rpc::encode(Request::<LocationRequest> {
+            id: Some(next_request_id()),
+            method: "document/location".into(),
+            params: None,
+        }),
+        EditorOutbound::ShutdownRequest => rpc::encode(Request::<ShutdownRequest> {
+            id: None,
+            method: "shutdown".into(),
+            params: None,
+        }),
+        EditorOutbound::ChangeCwd(ChangeCwdRequest { cwd }) => {
+            rpc::encode(Request::<ChangeCwdRequest> {
                 id: Some(next_request_id()),
                 method: "change_cwd".into(),
                 params: Some(ChangeCwdRequest { cwd }),
-            }),
-            CspRequest::InitialFileUri { initial_file_uri } => {
-                rpc::encode(Request::<InitialFileUriRequest> {
-                    id: Some(next_request_id()),
-                    method: "initial_file_uri".into(),
-                    params: Some(InitialFileUriRequest { initial_file_uri }),
-                })
-            }
-        },
-        EditorOutbound::Notification(notification) => match notification {
-            CspNotification::PeerConnected { client_id } => {
-                rpc::encode(Notification::<PeerConnectedNotification> {
-                    method: "peer_connected".into(),
-                    params: Some(PeerConnectedNotification { client_id }),
-                })
-            }
-            CspNotification::PeerExists {
+            })
+        }
+        EditorOutbound::InitialFileUri(InitialFileUriRequest { initial_file_uri }) => {
+            rpc::encode(Request::<InitialFileUriRequest> {
+                id: Some(next_request_id()),
+                method: "initial_file_uri".into(),
+                params: Some(InitialFileUriRequest { initial_file_uri }),
+            })
+        }
+        EditorOutbound::PeerConnected(PeerConnectedNotification { client_id }) => {
+            rpc::encode(Notification::<PeerConnectedNotification> {
+                method: "peer_connected".into(),
+                params: Some(PeerConnectedNotification { client_id }),
+            })
+        }
+        EditorOutbound::PeerExists(PeerExistsNotification {
+            client_id,
+            location,
+        }) => rpc::encode(Notification::<PeerExistsNotification> {
+            method: "peer_exists".into(),
+            params: Some(PeerExistsNotification {
                 client_id,
                 location,
-            } => rpc::encode(Notification::<PeerExistsNotification> {
-                method: "peer_exists".into(),
-                params: Some(PeerExistsNotification {
-                    client_id,
-                    location: location.map(|l| l.into()),
-                }),
             }),
-            CspNotification::PeerDisconnected { client_id } => {
-                rpc::encode(Notification::<PeerDisconnectedNotification> {
-                    method: "peer_disconnected".into(),
-                    params: Some(PeerDisconnectedNotification { client_id }),
-                })
-            }
-            CspNotification::ClientIdChanged { client_id } => {
-                rpc::encode(Notification::<ClientIdChangedNotification> {
-                    method: "client_id_changed".into(),
-                    params: Some(ClientIdChangedNotification { client_id }),
-                })
-            }
-            CspNotification::CursorMoved {
+        }),
+        EditorOutbound::PeerDisconnected(PeerDisconnectedNotification { client_id }) => {
+            rpc::encode(Notification::<PeerDisconnectedNotification> {
+                method: "peer_disconnected".into(),
+                params: Some(PeerDisconnectedNotification { client_id }),
+            })
+        }
+        EditorOutbound::ClientIdChanged(ClientIdChangedNotification { client_id }) => {
+            rpc::encode(Notification::<ClientIdChangedNotification> {
+                method: "client_id_changed".into(),
+                params: Some(ClientIdChangedNotification { client_id }),
+            })
+        }
+        EditorOutbound::CursorMoved(CursorMovedNotification {
+            client_id,
+            location,
+        }) => rpc::encode(Notification::<CursorMovedNotification> {
+            method: "cursor_moved".into(),
+            params: Some(CursorMovedNotification {
                 client_id,
                 location,
-            } => rpc::encode(Notification::<CursorMovedNotification> {
-                method: "cursor_moved".into(),
-                params: Some(CursorMovedNotification {
-                    client_id,
-                    location,
-                }),
             }),
-            CspNotification::DocumentEdited {
+        }),
+        EditorOutbound::DocumentEditedFull(DocumentEditedFull {
+            client_id,
+            uri,
+            content,
+            ..
+        }) => rpc::encode(Notification::<DocumentEditedFull> {
+            method: "document/edited".into(),
+            params: Some(DocumentEditedFull {
                 client_id,
+                mode: DocumentEditMode::Full,
                 uri,
                 content,
-            } => rpc::encode(Notification::<DocumentEditedFull> {
-                method: "document/edited".into(),
-                params: Some(DocumentEditedFull {
-                    client_id,
-                    mode: DocumentEditMode::Full,
-                    uri,
-                    content,
-                }),
             }),
-        },
+        }),
         EditorOutbound::UnknownMethod => rpc::encode("unknown method"),
     }
 }

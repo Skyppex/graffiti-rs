@@ -13,11 +13,11 @@ use tokio::{
 use tracing::{debug, info};
 
 use crate::{
-    csp,
+    csp::{self, MoveCursorNotification},
     id::next_request_id,
     ppp,
     session::{
-        editor::{CspNotification, CspRequest, CspResponse, EditorInbound, EditorOutbound},
+        editor::{CspResponse, EditorInbound, EditorOutbound},
         peer::{Peer, PeerId, PeerMessage, PppNotification, PppRequest, PppResponse},
     },
     state::{self, State},
@@ -241,8 +241,8 @@ impl Session {
                 unreachable!("received client notification from non-client peer");
             };
 
-            self.to_editor(EditorOutbound::Notification(
-                CspNotification::PeerDisconnected { client_id },
+            self.to_editor(EditorOutbound::PeerDisconnected(
+                csp::PeerDisconnectedNotification { client_id },
             ))
             .await?;
 
@@ -253,8 +253,7 @@ impl Session {
             self.finish_shutdown().await?;
         } else {
             // the other side went away on its own: ask the editor to shut us down
-            self.to_editor(EditorOutbound::Request(CspRequest::Shutdown))
-                .await?;
+            self.to_editor(EditorOutbound::ShutdownRequest).await?;
             self.shutting_down = true;
         }
 
@@ -312,10 +311,9 @@ impl Session {
             EditorInbound::Initialized => {
                 info!("Received initialized message from editor");
 
-                self.to_editor(EditorOutbound::Request(CspRequest::Location))
-                    .await?;
+                self.to_editor(EditorOutbound::LocationRequest).await?;
             }
-            EditorInbound::MoveCursor { location } => {
+            EditorInbound::MoveCursor(MoveCursorNotification { location }) => {
                 info!("Received move_cursor message from editor");
 
                 if !location.exists() {
@@ -467,7 +465,7 @@ impl Session {
                 // the host has now told us who we are
                 self.me = PeerId::Client(result.client_id);
 
-                self.to_editor(EditorOutbound::Request(CspRequest::ChangeCwd {
+                self.to_editor(EditorOutbound::ChangeCwd(csp::ChangeCwdRequest {
                     cwd: new_cwd,
                 }))
                 .await?;
@@ -478,13 +476,13 @@ impl Session {
                     peer.initialized = true;
                 }
 
-                self.to_editor(EditorOutbound::Notification(
-                    CspNotification::PeerConnected { client_id: 1 },
+                self.to_editor(EditorOutbound::PeerConnected(
+                    csp::PeerConnectedNotification { client_id: 1 },
                 ))
                 .await?;
 
-                self.to_editor(EditorOutbound::Notification(
-                    CspNotification::ClientIdChanged {
+                self.to_editor(EditorOutbound::ClientIdChanged(
+                    csp::ClientIdChangedNotification {
                         client_id: result.client_id,
                     },
                 ))
@@ -528,10 +526,8 @@ impl Session {
                     unreachable!("received client notification from non-client peer");
                 };
 
-                self.to_editor(EditorOutbound::Notification(
-                    CspNotification::PeerConnected {
-                        client_id: client_id.to_owned(),
-                    },
+                self.to_editor(EditorOutbound::PeerConnected(
+                    csp::PeerConnectedNotification { client_id },
                 ))
                 .await?;
 
@@ -605,8 +601,8 @@ impl Session {
             PppNotification::PeerConnected(params) => {
                 info!("Received peer_connected notification");
 
-                self.to_editor(EditorOutbound::Notification(
-                    CspNotification::PeerConnected {
+                self.to_editor(EditorOutbound::PeerConnected(
+                    csp::PeerConnectedNotification {
                         client_id: params.client_id,
                     },
                 ))
@@ -615,17 +611,17 @@ impl Session {
             PppNotification::PeerExists(params) => {
                 info!("Received peer_exists notification");
 
-                self.to_editor(EditorOutbound::Notification(CspNotification::PeerExists {
+                self.to_editor(EditorOutbound::PeerExists(ppp::PeerExistsNotification {
                     client_id: params.client_id,
-                    location: params.location.map(|l| l.into()),
+                    location: params.location,
                 }))
                 .await?;
             }
             PppNotification::PeerDisconnected(params) => {
                 info!("Received peer_disconnected notification");
 
-                self.to_editor(EditorOutbound::Notification(
-                    CspNotification::PeerDisconnected {
+                self.to_editor(EditorOutbound::PeerDisconnected(
+                    csp::PeerDisconnectedNotification {
                         client_id: params.client_id,
                     },
                 ))
@@ -662,7 +658,7 @@ impl Session {
             PppNotification::InitialFileUri(params) => {
                 info!("Received initial_file_uri notification");
 
-                self.to_editor(EditorOutbound::Request(CspRequest::InitialFileUri {
+                self.to_editor(EditorOutbound::InitialFileUri(csp::InitialFileUriRequest {
                     initial_file_uri: params.uri,
                 }))
                 .await?;
@@ -675,7 +671,7 @@ impl Session {
                     .await
                     .set_client_location(params.client_id, params.location.clone().into());
 
-                self.to_editor(EditorOutbound::Notification(CspNotification::CursorMoved {
+                self.to_editor(EditorOutbound::CursorMoved(csp::CursorMovedNotification {
                     client_id: params.client_id,
                     location: params.location.clone().into(),
                 }))
@@ -697,9 +693,10 @@ impl Session {
                 let full_uri = state.get_cwd().join(&params.uri);
                 drop(state);
 
-                self.to_editor(EditorOutbound::Notification(
-                    CspNotification::DocumentEdited {
+                self.to_editor(EditorOutbound::DocumentEditedFull(
+                    csp::DocumentEditedFull {
                         client_id: params.client_id,
+                        mode: csp::DocumentEditMode::Full,
                         uri: full_uri,
                         content: params.content.clone(),
                     },
