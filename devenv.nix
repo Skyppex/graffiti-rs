@@ -1,8 +1,6 @@
 {
   pkgs,
   lib,
-  config,
-  inputs,
   ...
 }: {
   env.LD_LIBRARY_PATH = with pkgs; lib.makeLibraryPath [openssl];
@@ -13,10 +11,10 @@
     yaml-language-server
     pkg-config
     alejandra
-    nixd
   ];
 
   languages.rust.enable = true;
+  languages.nix.enable = true;
 
   # https://devenv.sh/basics/
   enterShell = ''
