@@ -3,7 +3,6 @@ mod csp;
 mod id;
 mod log;
 mod net;
-mod path_utils;
 mod ppp;
 mod rpc;
 mod session;

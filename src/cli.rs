@@ -3,8 +3,6 @@ use std::{path::PathBuf, str::FromStr};
 use clap::{ArgGroup, Parser, Subcommand};
 use tracing::level_filters::LevelFilter;
 
-use crate::path_utils::get_path;
-
 #[derive(Debug, Clone, Parser)]
 #[command(group = ArgGroup::new("log").args(["log_file", "log_to_stderr"]).required(false).multiple(false))]
 pub struct Cli {
@@ -34,8 +32,11 @@ pub struct Cli {
 }
 
 fn parse_level_filter(value: &str) -> Result<LevelFilter, String> {
-    LevelFilter::from_str(value)
-        .map_err(|_| format!("unknown log level '{value}', expected one of: trace, debug, info, warn, error, off"))
+    LevelFilter::from_str(value).map_err(|_| {
+        format!(
+            "unknown log level '{value}', expected one of: trace, debug, info, warn, error, off"
+        )
+    })
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -43,14 +44,14 @@ pub enum Commands {
     /// Start as a host
     Host {
         /// Path to authorized_keys file for public key authentication
-        #[arg(long, value_parser = get_path)]
+        #[arg(long)]
         authorized_keys: PathBuf,
     },
     /// Connect to a host
     Connect {
         sha: String,
         /// Path to client's private key for public key authentication
-        #[arg(long, value_parser = get_path)]
+        #[arg(long)]
         client_key: PathBuf,
     },
 }
