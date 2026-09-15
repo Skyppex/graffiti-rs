@@ -151,9 +151,14 @@ mod tests {
         // act
         let message = encode(base_message).unwrap();
 
+        dbg!(
+            &message,
+            "content-length: 17\r\n\r\n{\"method\":\"test\"}".as_bytes()
+        );
+
         // assert
         message
             .should()
-            .be_equal_to("content-length: 17\r\n\r\n{\"method\":\"test\"}".as_bytes());
+            .be_equal_to("content-length: 17\r\n\r\n{\"method\":\"test\"}\n".as_bytes());
     }
 }

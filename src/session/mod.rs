@@ -883,7 +883,7 @@ mod tests {
                 response: CspResponse::Initialize { client_id, token },
             } => {
                 assert_eq!(req_id, "1");
-                assert_eq!(client_id, 0);
+                assert_eq!(client_id, 1);
 
                 // the initialize response is where the editor learns the token:
                 // it must round-trip back into a token and an address
@@ -907,8 +907,8 @@ mod tests {
 
         let (a_link_sender, mut a_link_receiver) = mpsc::channel(8);
         let (b_link_sender, mut b_link_receiver) = mpsc::channel(8);
-        let a = PeerId::Client(1);
-        let b = PeerId::Client(2);
+        let a = PeerId::Client(2);
+        let b = PeerId::Client(3);
 
         handle
             .send(SessionEvent::PeerConnected(a, a_link_sender))
@@ -921,7 +921,7 @@ mod tests {
             .unwrap();
 
         // both peers finish their handshake
-        for id in [1, 2] {
+        for id in [2, 3] {
             handle
                 .send(SessionEvent::FromPeer(
                     PeerId::Client(id),
@@ -939,7 +939,7 @@ mod tests {
                 a,
                 PeerMessage::Notification(PppNotification::CursorMoved(
                     ppp::CursorMovedNotification {
-                        client_id: 1,
+                        client_id: 2,
                         location: ppp::DocumentLocation {
                             uri: PathBuf::from("file.txt"),
                             pos: ppp::DocumentPosition { line: 1, column: 2 },
@@ -950,16 +950,30 @@ mod tests {
             .await
             .unwrap();
 
-        // assert: B receives the relayed move, attributed to A
-        let relayed = b_link_receiver.recv().await.unwrap();
-        match relayed {
-            PeerMessage::Notification(PppNotification::CursorMoved(params)) => {
-                assert_eq!(params.client_id, 1);
+        // assert: B receives the relayed move, attributed to A. The handshake
+        // also queued some peer-discovery notifications on B's link, so skip
+        // past those instead of assuming the move arrives first.
+        let relayed = loop {
+            match b_link_receiver.recv().await.expect("B's link closed") {
+                PeerMessage::Notification(PppNotification::CursorMoved(params)) => break params,
+                PeerMessage::Notification(
+                    PppNotification::PeerConnected(_) | PppNotification::PeerExists(_),
+                ) => continue,
+                other => panic!("expected a relayed cursor move, got {:?}", other),
             }
-            other => panic!("expected a relayed cursor move, got {:?}", other),
-        }
+        };
+        assert_eq!(relayed.client_id, 2);
 
-        // and A got nothing back
-        assert!(a_link_receiver.try_recv().is_err());
+        // and the move never came back to A. The session handles events in
+        // order, so everything A is ever going to get is queued by now.
+        while let Ok(msg) = a_link_receiver.try_recv() {
+            assert!(
+                !matches!(
+                    msg,
+                    PeerMessage::Notification(PppNotification::CursorMoved(_))
+                ),
+                "the origin was sent its own cursor move back"
+            );
+        }
     }
 }
