@@ -7,20 +7,15 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tracing::info;
 
-use crate::DynResult;
+use crate::{session::Configuration, DynResult};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
-/// The host picks the first of these the client also supports. Hardcoded
-/// until the CSP grows a configure method.
-const HOST_PREFERENCE: [Protocol; 2] = [Protocol::Ssh, Protocol::Wss];
-
-/// What this build's client offers in its hello. Same story as above.
-const CLIENT_SUPPORTED: [Protocol; 2] = [Protocol::Ssh, Protocol::Wss];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Protocol {
+    #[serde(rename = "ssh")]
     Ssh,
+    #[serde(rename = "wss")]
     Wss,
 }
 
@@ -77,7 +72,7 @@ enum HostReply {
 
 /// Host side of the prelude. On success the socket's very next bytes belong
 /// to the returned protocol.
-pub async fn negotiate_host<S>(stream: &mut S) -> DynResult<Protocol>
+pub async fn negotiate_host<S>(stream: &mut S, configuration: &Configuration) -> DynResult<Protocol>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -102,8 +97,9 @@ where
         .filter_map(|name| Protocol::from_wire_name(name))
         .collect();
 
-    let Some(protocol) = HOST_PREFERENCE
-        .into_iter()
+    let Some(protocol) = configuration
+        .protocol_preference
+        .iter()
         .find(|preferred| client_protocols.contains(preferred))
     else {
         return refuse(
@@ -129,12 +125,15 @@ where
     )
     .await?;
 
-    Ok(protocol)
+    Ok(protocol.clone())
 }
 
 /// Client side of the prelude. On success the socket's very next bytes belong
 /// to the returned protocol.
-pub async fn negotiate_client<S>(stream: &mut S) -> DynResult<Protocol>
+pub async fn negotiate_client<S>(
+    stream: &mut S,
+    configuration: &Configuration,
+) -> DynResult<Protocol>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -142,7 +141,8 @@ where
         stream,
         &Hello {
             version: PROTOCOL_VERSION,
-            protocols: CLIENT_SUPPORTED
+            protocols: configuration
+                .protocol_preference
                 .iter()
                 .map(|protocol| protocol.wire_name().to_string())
                 .collect(),
@@ -155,7 +155,7 @@ where
             info!("bootstrap switch: {:?}", switch);
 
             Protocol::from_wire_name(&switch.protocol)
-                .filter(|protocol| CLIENT_SUPPORTED.contains(protocol))
+                .filter(|protocol| configuration.protocol_preference.contains(protocol))
                 .ok_or_else(|| {
                     format!("host switched to unsupported protocol: {}", switch.protocol).into()
                 })
@@ -247,13 +247,27 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    fn create_configuration() -> Configuration {
+        Configuration {
+            authorized_keys: PathBuf::new(),
+            client_key: PathBuf::new(),
+            protocol_preference: vec![Protocol::Ssh, Protocol::Wss],
+        }
+    }
 
     #[tokio::test]
     async fn both_sides_agree_on_ssh() {
         let (mut host_end, mut client_end) = tokio::io::duplex(4096);
 
-        let host = tokio::spawn(async move { negotiate_host(&mut host_end).await });
-        let picked = negotiate_client(&mut client_end).await.unwrap();
+        let host =
+            tokio::spawn(
+                async move { negotiate_host(&mut host_end, &create_configuration()).await },
+            );
+        let picked = negotiate_client(&mut client_end, &create_configuration())
+            .await
+            .unwrap();
 
         assert_eq!(picked, Protocol::Ssh);
         assert_eq!(host.await.unwrap().unwrap(), Protocol::Ssh);
@@ -264,13 +278,17 @@ mod tests {
         let (mut host_end, mut client_end) = tokio::io::duplex(4096);
 
         let host = tokio::spawn(async move {
-            let protocol = negotiate_host(&mut host_end).await.unwrap();
+            let protocol = negotiate_host(&mut host_end, &create_configuration())
+                .await
+                .unwrap();
             // the first post-prelude bytes the real protocol would send
             host_end.write_all(b"SSH-2.0-banner").await.unwrap();
             protocol
         });
 
-        negotiate_client(&mut client_end).await.unwrap();
+        negotiate_client(&mut client_end, &create_configuration())
+            .await
+            .unwrap();
 
         // if the prelude over-read, part of this banner is gone
         let mut banner = [0u8; 14];
@@ -284,7 +302,10 @@ mod tests {
     async fn unknown_protocols_get_refused() {
         let (mut host_end, mut client_end) = tokio::io::duplex(4096);
 
-        let host = tokio::spawn(async move { negotiate_host(&mut host_end).await });
+        let host =
+            tokio::spawn(
+                async move { negotiate_host(&mut host_end, &create_configuration()).await },
+            );
 
         write_frame(
             &mut client_end,
@@ -307,7 +328,10 @@ mod tests {
     async fn version_mismatch_gets_refused() {
         let (mut host_end, mut client_end) = tokio::io::duplex(4096);
 
-        let host = tokio::spawn(async move { negotiate_host(&mut host_end).await });
+        let host =
+            tokio::spawn(
+                async move { negotiate_host(&mut host_end, &create_configuration()).await },
+            );
 
         write_frame(
             &mut client_end,
@@ -343,7 +367,7 @@ mod tests {
             .unwrap();
         });
 
-        let result = negotiate_client(&mut client_end).await;
+        let result = negotiate_client(&mut client_end, &create_configuration()).await;
 
         assert!(result.unwrap_err().to_string().contains("not today"));
         host.await.unwrap();

@@ -14,7 +14,8 @@ use tracing::{debug, info};
 
 use crate::{
     csp::{self, MoveCursorNotification},
-    id::next_request_id,
+    id::{next_client_id, next_request_id},
+    net::{self, bootstrap::Protocol},
     ppp,
     session::{
         editor::{CspResponse, EditorInbound, EditorOutbound},
@@ -47,12 +48,33 @@ pub struct Session {
     pending_shutdown: Option<String>,
     shutting_down: bool,
     token: String,
+    configuration: Option<Configuration>,
+    handle: SessionHandle,
+    network_task: Option<tokio::task::JoinHandle<DynResult<()>>>,
+}
+
+#[derive(Clone)]
+pub struct Configuration {
+    pub authorized_keys: PathBuf,
+    pub client_key: PathBuf,
+    pub protocol_preference: Vec<Protocol>,
+}
+
+impl From<csp::ConfigurationResponse> for Configuration {
+    fn from(value: csp::ConfigurationResponse) -> Self {
+        Configuration {
+            authorized_keys: value.authorized_keys,
+            client_key: value.client_key,
+            protocol_preference: value.protocol_preference,
+        }
+    }
 }
 
 #[derive(Clone)]
 pub struct SessionHandle {
     /// sends events into the session's inbox
     inbox_sender: mpsc::Sender<SessionEvent>,
+
     /// the host's identity, when this is a host session
     identity: Option<identity::Identity>,
 }
@@ -116,6 +138,11 @@ impl Session {
             Role::Client => PeerId::Client(1),
         };
 
+        let handle = SessionHandle {
+            inbox_sender,
+            identity: host_identity,
+        };
+
         Ok((
             Session {
                 me: my_peer_id,
@@ -127,17 +154,58 @@ impl Session {
                 pending_shutdown: None,
                 shutting_down: false,
                 token: session_token,
+                configuration: None,
+                handle: handle.clone(),
+                network_task: None,
             },
-            SessionHandle {
-                inbox_sender,
-                identity: host_identity,
-            },
+            handle,
         ))
+    }
+
+    pub fn set_configuration(&mut self, configuration: Configuration) {
+        self.configuration = Some(configuration);
     }
 
     // all peers
     fn is_host(&self) -> bool {
         matches!(self.me, PeerId::Host)
+    }
+
+    async fn start_net(&mut self) -> DynResult<()> {
+        if self.network_task.is_some() {
+            return Err("network task already started".into());
+        }
+
+        let network_task = match self.me {
+            PeerId::Host => {
+                let Some(configuration) = &self.configuration else {
+                    return Err("started network without a configuration".into());
+                };
+
+                info!("Starting host mode");
+
+                let my_client_id = next_client_id();
+                info!("my client id is {}", my_client_id);
+                self.state.lock().await.set_client_id(my_client_id);
+
+                tokio::spawn(net::run_host(self.handle.clone(), configuration.clone()))
+            }
+            PeerId::Client(_) => {
+                let Some(configuration) = &self.configuration else {
+                    return Err("started network without a configuration".into());
+                };
+
+                tokio::spawn(net::run_client(
+                    self.token.clone(),
+                    self.handle.clone(),
+                    configuration.clone(),
+                ))
+            }
+        };
+
+        self.network_task = Some(network_task);
+
+        Ok(())
     }
 
     // all peers
@@ -312,6 +380,7 @@ impl Session {
                 info!("Received initialized message from editor");
 
                 self.to_editor(EditorOutbound::LocationRequest).await?;
+                self.to_editor(EditorOutbound::Configuration).await?;
             }
             EditorInbound::MoveCursor(MoveCursorNotification { location }) => {
                 info!("Received move_cursor message from editor");
@@ -334,6 +403,11 @@ impl Session {
                     None,
                 )
                 .await?;
+            }
+            EditorInbound::Configuration(configuration) => {
+                info!("Received configuration message from editor");
+                self.set_configuration(configuration);
+                self.start_net().await?;
             }
             EditorInbound::DocumentEditFull { uri, content } => {
                 info!("Received document/edit message from editor");
@@ -360,10 +434,10 @@ impl Session {
                     )
                     .await?;
                 } else {
-                    info!("File doesn't exist");
+                    info!("File doesn't exist: {:?}", uri);
                 }
             }
-            EditorInbound::DocumentLocation { location } => {
+            EditorInbound::DocumentLocation(location) => {
                 info!("Received document/location message from editor");
                 self.state.lock().await.set_my_location(location);
             }

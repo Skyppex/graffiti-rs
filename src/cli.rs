@@ -42,16 +42,7 @@ fn parse_level_filter(value: &str) -> Result<LevelFilter, String> {
 #[derive(Debug, Clone, Subcommand)]
 pub enum Commands {
     /// Start as a host
-    Host {
-        /// Path to authorized_keys file for public key authentication
-        #[arg(long)]
-        authorized_keys: PathBuf,
-    },
+    Host,
     /// Connect to a host
-    Connect {
-        sha: String,
-        /// Path to client's private key for public key authentication
-        #[arg(long)]
-        client_key: PathBuf,
-    },
+    Connect { sha: String },
 }

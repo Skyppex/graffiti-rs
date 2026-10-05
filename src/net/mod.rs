@@ -1,6 +1,8 @@
 pub mod bootstrap;
 pub mod connection;
 
+use std::path::PathBuf;
+
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::mpsc,
@@ -17,16 +19,14 @@ use crate::{
     session::{
         identity::{parse_token, resolve_public_ip, BOOTSTRAP_PORT},
         peer::{PeerId, PeerMessage},
-        SessionEvent, SessionHandle,
+        Configuration, SessionEvent, SessionHandle,
     },
     DynResult,
 };
 
-pub async fn run_host(
-    session: SessionHandle,
-    authorized_keys_path: std::path::PathBuf,
-) -> DynResult<()> {
-    let authorized_keys = connection::load_authorized_keys(&authorized_keys_path)?;
+pub async fn run_host(session: SessionHandle, configuration: Configuration) -> DynResult<()> {
+    info!("Running host");
+    let authorized_keys = connection::load_authorized_keys(&configuration.authorized_keys)?;
 
     // the transport proves possession of the session's key, never a key of
     // its own: the session owns its identity, the network borrows it
@@ -45,7 +45,7 @@ pub async fn run_host(
 
         info!("bootstrap connection from {}", peer_addr);
 
-        let Ok(protocol) = bootstrap::negotiate_host(&mut socket).await else {
+        let Ok(protocol) = bootstrap::negotiate_host(&mut socket, &configuration).await else {
             warn!("bootstrap failed for {}", peer_addr);
             continue;
         };
@@ -78,7 +78,7 @@ pub async fn run_host(
 pub async fn run_client(
     token: String,
     session: SessionHandle,
-    client_key_path: std::path::PathBuf,
+    configuration: Configuration,
 ) -> DynResult<()> {
     let (expected_fingerprint, bootstrap_addr) = parse_token(&token)?;
 
@@ -96,13 +96,14 @@ pub async fn run_client(
 
     info!("connecting to bootstrap endpoint {}", bootstrap_addr);
     let mut socket = TcpStream::connect(&bootstrap_addr).await?;
+    info!("connected to bootstrap endpoint {}", bootstrap_addr);
 
-    let protocol = bootstrap::negotiate_client(&mut socket).await?;
+    let protocol = bootstrap::negotiate_client(&mut socket, &configuration).await?;
     info!("negotiated protocol: {:?}", protocol);
 
     let connection = match protocol {
         Protocol::Ssh => {
-            Connection::ssh_client(socket, expected_fingerprint, client_key_path).await?
+            Connection::ssh_client(socket, expected_fingerprint, &configuration).await?
         }
         Protocol::Wss => return Err("wss transport not implemented yet".into()),
     };

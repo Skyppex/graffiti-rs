@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     id::next_request_id,
+    net::bootstrap::Protocol,
     ppp::{self, PeerExistsNotification},
     rpc,
     session::editor::{CspResponse, EditorInbound, EditorOutbound},
@@ -102,6 +103,16 @@ pub struct PeerDisconnectedNotification {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChangeCwdRequest {
     pub cwd: PathBuf,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ConfigurationRequest;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ConfigurationResponse {
+    pub authorized_keys: PathBuf,
+    pub client_key: PathBuf,
+    pub protocol_preference: Vec<Protocol>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -228,6 +239,9 @@ pub fn decode(message: &rpc::MessageInfo) -> DynResult<EditorInbound> {
             params: rpc::decode_params(&message.content)?,
         },
         "initialized" => EditorInbound::Initialized,
+        "configuration" => EditorInbound::Configuration(
+            rpc::decode_params::<ConfigurationResponse>(&message.content)?.into(),
+        ),
         "move_cursor" => {
             let params: MoveCursorNotification = rpc::decode_params(&message.content)?;
             EditorInbound::MoveCursor(MoveCursorNotification {
@@ -252,9 +266,7 @@ pub fn decode(message: &rpc::MessageInfo) -> DynResult<EditorInbound> {
         }
         "document/location" => {
             let params: LocationResponse = rpc::decode_params(&message.content)?;
-            EditorInbound::DocumentLocation {
-                location: params.location,
-            }
+            EditorInbound::DocumentLocation(params.location)
         }
         "cwd_changed" => EditorInbound::CwdChanged,
         "request_session_token" => EditorInbound::RequestSessionToken { req_id: req_id()? },
@@ -308,6 +320,11 @@ pub fn encode(message: EditorOutbound) -> DynResult<Vec<u8>> {
                 params: Some(ChangeCwdRequest { cwd }),
             })
         }
+        EditorOutbound::Configuration => rpc::encode(Request::<ConfigurationRequest> {
+            id: Some(next_request_id()),
+            method: "configuration".into(),
+            params: None,
+        }),
         EditorOutbound::InitialFileUri(InitialFileUriRequest { initial_file_uri }) => {
             rpc::encode(Request::<InitialFileUriRequest> {
                 id: Some(next_request_id()),

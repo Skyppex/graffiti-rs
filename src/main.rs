@@ -12,7 +12,6 @@ use std::{error::Error, process};
 
 use clap::Parser;
 use cli::{Cli, Commands};
-use id::next_client_id;
 use session::{
     editor::{EditorInbound, EditorOutbound},
     Role, Session, SessionEvent, SessionHandle,
@@ -40,7 +39,7 @@ async fn main() -> DynResult<()> {
 
     info!("Starting graffiti-rs");
 
-    let is_host = matches!(cli.command, Commands::Host { .. });
+    let is_host = matches!(cli.command, Commands::Host);
 
     let (editor_sender, mut session_receiver) = mpsc::channel::<EditorOutbound>(8);
 
@@ -56,30 +55,14 @@ async fn main() -> DynResult<()> {
     // band: the session records it, and the network layer turns it into a
     // host key check
     let known_token = match &cli.command {
-        Commands::Connect { sha, .. } => Some(sha.clone()),
-        Commands::Host { .. } => None,
+        Commands::Connect { sha } => Some(sha.clone()),
+        Commands::Host => None,
     };
 
     let (session, session_handle) =
         Session::new(role, state.clone(), editor_sender.clone(), known_token).await?;
 
     let session_task = tokio::spawn(session.run());
-
-    let network_task = match cli.command {
-        Commands::Host { authorized_keys } => {
-            info!("Starting host mode");
-
-            let my_client_id = next_client_id();
-            info!("my client id is {}", my_client_id);
-            state.lock().await.set_client_id(my_client_id);
-
-            tokio::spawn(net::run_host(session_handle.clone(), authorized_keys))
-        }
-        Commands::Connect { sha, client_key } => {
-            info!("Starting client mode");
-            tokio::spawn(net::run_client(sha, session_handle.clone(), client_key))
-        }
-    };
 
     // the outbound half of the editor endpoint: encodes what the session
     // emits and writes it to the editor over stdout
@@ -104,7 +87,6 @@ async fn main() -> DynResult<()> {
     let shutting_down = session_task.await.unwrap_or(false);
 
     editor_reader_task.abort();
-    network_task.abort();
 
     // every other editor_sender clone is gone once the session has returned,
     // so this closes the channel and lets the editor writer drain and exit

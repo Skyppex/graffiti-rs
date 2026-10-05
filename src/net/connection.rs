@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 use futures_util::{SinkExt, StreamExt};
 use russh::{
@@ -12,10 +12,13 @@ use tokio::{
     sync::oneshot,
 };
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
-    session::identity::{key_fingerprint, Identity},
+    session::{
+        identity::{key_fingerprint, Identity},
+        Configuration,
+    },
     DynError, DynResult,
 };
 
@@ -76,7 +79,9 @@ pub enum ConnectionReader {
     SshClient(FramedRead<ReadHalf<ChannelStream<client::Msg>>, LengthDelimitedCodec>),
 }
 
-pub fn load_authorized_keys(path: &std::path::Path) -> DynResult<Vec<[u8; 32]>> {
+pub fn load_authorized_keys(path: impl AsRef<Path>) -> DynResult<Vec<[u8; 32]>> {
+    let path = path.as_ref();
+
     let content = std::fs::read_to_string(path).map_err(|e| {
         format!(
             "failed to read authorized keys file {}: {}",
@@ -144,14 +149,14 @@ impl Connection {
     pub async fn ssh_client(
         socket: TcpStream,
         expected_fingerprint: [u8; 32],
-        client_key_path: std::path::PathBuf,
+        configuration: &Configuration,
     ) -> DynResult<Self> {
-        let content = tokio::fs::read_to_string(&client_key_path)
+        let content = tokio::fs::read_to_string(&configuration.client_key)
             .await
             .map_err(|e| {
                 format!(
                     "failed to read client key file {}: {}",
-                    client_key_path.display(),
+                    configuration.client_key.display(),
                     e
                 )
             })?;

@@ -7,6 +7,7 @@ use crate::{
         PeerConnectedNotification, PeerDisconnectedNotification,
     },
     ppp::PeerExistsNotification,
+    session::Configuration,
 };
 
 /// A decoded CSP message from the editor. Produced by csp::decode in the
@@ -25,13 +26,12 @@ pub enum EditorInbound {
     },
 
     // responses
+    Configuration(Configuration),
     DocumentEditFull {
         uri: PathBuf,
         content: String,
     },
-    DocumentLocation {
-        location: csp::DocumentLocation,
-    },
+    DocumentLocation(csp::DocumentLocation),
 
     // notifications
     MoveCursor(MoveCursorNotification),
@@ -53,6 +53,7 @@ pub enum EditorOutbound {
     ShutdownRequest,
     InitialFileUri(InitialFileUriRequest),
     ChangeCwd(ChangeCwdRequest),
+    Configuration,
 
     // response
     Response {
