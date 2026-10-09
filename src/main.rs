@@ -30,12 +30,7 @@ type DynResult<T> = Result<T, DynError>;
 async fn main() -> DynResult<()> {
     let cli = Cli::parse();
 
-    log::init(
-        cli.log_file.clone(),
-        cli.log_to_stderr,
-        cli.log_level,
-        cli.log_filter.clone(),
-    );
+    log::init((&cli).into());
 
     info!("Starting graffiti-rs");
 
